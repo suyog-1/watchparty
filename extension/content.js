@@ -36,6 +36,9 @@ let videoMutObs = null;
 let inRoom      = false;
 let isHost      = false; // true if we created the room (we're the sync authority)
 let pendingPlayback = null; // queued playback event waiting for videoEl
+let videoFoundPending = false;
+let videoPollInterval = null;
+let shadow = null;
 
 function findVideo() {
   const all = [...document.querySelectorAll('video')];
@@ -75,8 +78,6 @@ function attachVideo(video) {
   }
   applyPendingPlayback();
 }
-
-let videoFoundPending = false;
 
 function applyPendingPlayback() {
   if (!pendingPlayback || !videoEl) return;
@@ -121,7 +122,6 @@ function applyPlayback(action, currentTime) {
   setTimeout(() => { isSyncing = false; }, 500);
 }
 
-let videoPollInterval = null;
 function pollForVideo() {
   if (videoMutObs || videoPollInterval) return;
   const stop = () => {
@@ -403,8 +403,6 @@ async function searchGifs(query) {
 }
 
 // ── OVERLAY UI ────────────────────────────────────────────────────────────────
-
-let shadow = null;
 
 const OVERLAY_CSS = `
   *{box-sizing:border-box;margin:0;padding:0}
