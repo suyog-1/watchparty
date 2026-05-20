@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>no skip zone 💀</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Bangers&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <div id="screen-connect">
+    <div class="brand">
+      <h1>NO SKIP ZONE</h1>
+      <p class="tagline">cinema for two 🎬 no subscription needed bestie</p>
+    </div>
+
+    <div class="field">
+      <label>your name</label>
+      <input id="username" type="text" placeholder="e.g. daddy 💀" maxlength="20" autocomplete="off" />
+    </div>
+
+    <div class="field">
+      <label>server url</label>
+      <input id="server-url" type="text" placeholder="https://your-app.railway.app" autocomplete="off" />
+      <span class="hint">deploy once on railway.app (free) — see readme</span>
+    </div>
+
+    <button id="create-btn" class="btn primary">🎬 start the party</button>
+
+    <div class="divider">already got a code?</div>
+
+    <div class="row">
+      <input id="room-code" type="text" placeholder="XXXXXX" maxlength="6" autocomplete="off" />
+      <button id="join-btn" class="btn secondary">join 🍿</button>
+    </div>
+
+    <p id="error-msg" class="error hidden"></p>
+  </div>
+
+  <div id="screen-connected" class="hidden">
+    <div class="brand">
+      <h1>NO SKIP ZONE</h1>
+      <p class="tagline">you're in bestie 🫶</p>
+    </div>
+
+    <div class="connected-box">
+      <div class="info-row">
+        <div>
+          <div class="label">room code (click to copy)</div>
+          <div id="display-code" class="code"></div>
+        </div>
+        <div>
+          <div class="label">watching with</div>
+          <div id="display-members" class="members">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tip">
+      👀 look for the <strong>no skip zone</strong> panel in the <strong>bottom-right</strong> corner of the streaming site — that's where the chat &amp; gifs live
+    </div>
+
+    <button id="leave-btn" class="btn danger">💀 leave room</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

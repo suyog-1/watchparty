@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>watchparty ❤️</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- LOBBY -->
+  <div id="lobby">
+    <div class="lobby-card">
+      <h1>watchparty <span class="heart">&#10084;</span></h1>
+      <p class="subtitle">watch movies together, perfectly in sync</p>
+
+      <input id="username-input" type="text" placeholder="your name" maxlength="20" autocomplete="off" />
+
+      <div class="lobby-actions">
+        <button id="create-btn" class="btn primary">create room</button>
+        <div class="divider">or join one</div>
+        <div class="join-row">
+          <input id="room-code-input" type="text" placeholder="room code" maxlength="6" autocomplete="off" />
+          <button id="join-btn" class="btn secondary">join</button>
+        </div>
+      </div>
+      <p id="lobby-error" class="error hidden"></p>
+    </div>
+  </div>
+
+  <!-- ROOM -->
+  <div id="room" class="hidden">
+    <div class="room-layout">
+
+      <!-- VIDEO PANEL -->
+      <div class="video-panel">
+
+        <div class="video-topbar">
+          <div class="topbar-left">
+            <span id="room-code-display" title="click to copy"></span>
+            <span id="members-display"></span>
+          </div>
+          <button id="change-video-btn" class="btn secondary small">change video</button>
+        </div>
+
+        <!-- video source picker (shown until a video is set) -->
+        <div id="source-picker">
+          <div class="source-card">
+            <div class="source-icon">&#127909;</div>
+            <p>paste a YouTube link to start watching</p>
+            <div class="url-row">
+              <input id="yt-url-input" type="text" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off" />
+              <button id="yt-load-btn" class="btn primary">load</button>
+            </div>
+            <p id="yt-error" class="error hidden"></p>
+            <div class="source-divider">or use a local file (both need the same file)</div>
+            <button id="local-file-btn" class="btn secondary small">choose local file</button>
+            <input type="file" id="file-input" accept="video/*" class="hidden" />
+          </div>
+        </div>
+
+        <!-- YouTube player container -->
+        <div id="yt-wrapper" class="hidden">
+          <div id="yt-player"></div>
+          <div id="yt-click-shield"></div>
+          <div id="reaction-overlay"></div>
+        </div>
+
+        <!-- Local file player -->
+        <div id="local-wrapper" class="hidden">
+          <video id="local-player" preload="metadata"></video>
+          <div id="reaction-overlay-local"></div>
+        </div>
+
+        <!-- unified controls (shown when any video is loaded) -->
+        <div id="controls" class="controls hidden">
+          <button id="play-pause-btn" class="ctrl-btn">&#9654;</button>
+          <div class="progress-wrap">
+            <span id="time-current">0:00</span>
+            <input type="range" id="seek-bar" value="0" min="0" step="0.5" />
+            <span id="time-total">0:00</span>
+          </div>
+          <input type="range" id="volume-bar" value="100" min="0" max="100" step="1" title="volume" />
+        </div>
+
+        <div id="reactions-bar" class="reactions-bar hidden">
+          <button class="react-btn" data-emoji="❤️">❤️</button>
+          <button class="react-btn" data-emoji="😂">😂</button>
+          <button class="react-btn" data-emoji="😱">😱</button>
+          <button class="react-btn" data-emoji="👏">👏</button>
+          <button class="react-btn" data-emoji="😭">😭</button>
+          <button class="react-btn" data-emoji="🔥">🔥</button>
+        </div>
+      </div>
+
+      <!-- CHAT PANEL -->
+      <div class="chat-panel">
+        <div class="chat-header">chat &#10084;</div>
+        <div id="chat-messages"></div>
+        <div class="chat-input-row">
+          <input id="chat-input" type="text" placeholder="say something..." maxlength="300" autocomplete="off" />
+          <button id="chat-send-btn" class="btn primary small">&#10148;</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- YouTube IFrame API loads async, calls onYouTubeIframeAPIReady when ready -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="app.js"></script>
+</body>
+</html>
