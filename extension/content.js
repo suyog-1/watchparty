@@ -47,21 +47,42 @@ function findVideo() {
 }
 
 function attachVideo(video) {
-  if (videoEl === video) return;
+  if (videoEl === video) {
+    // already attached — but maybe we have pending playback now
+    applyPendingPlayback();
+    return;
+  }
   detachVideo();
   videoEl = video;
   video.addEventListener('play',   onPlay);
   video.addEventListener('pause',  onPause);
   video.addEventListener('seeked', onSeeked);
   chrome.runtime.sendMessage({ type: 'register-video-frame' }).catch(() => {});
-  if (IS_TOP) appendSys('video found — sync ready 🎬');
-
-  // apply any playback event that arrived before the video was ready
-  if (pendingPlayback) {
-    const p = pendingPlayback;
-    pendingPlayback = null;
-    setTimeout(() => applyPlayback(p.action, p.currentTime), 200);
+  if (IS_TOP) {
+    if (shadow) appendSys('video found — sync ready 🎬');
+    else videoFoundPending = true; // log later when overlay is built
+    // if we're already in a room when video attaches, broadcast initial state
+    // (covers case where video loaded AFTER content script + after peer-joined)
+    if (inRoom) {
+      setTimeout(() => {
+        if (videoEl) wsSend({
+          type: 'playback',
+          action: videoEl.paused ? 'pause' : 'play',
+          currentTime: videoEl.currentTime,
+        });
+      }, 300);
+    }
   }
+  applyPendingPlayback();
+}
+
+let videoFoundPending = false;
+
+function applyPendingPlayback() {
+  if (!pendingPlayback || !videoEl) return;
+  const p = pendingPlayback;
+  pendingPlayback = null;
+  setTimeout(() => applyPlayback(p.action, p.currentTime), 200);
 }
 
 function detachVideo() {
@@ -100,13 +121,23 @@ function applyPlayback(action, currentTime) {
   setTimeout(() => { isSyncing = false; }, 500);
 }
 
+let videoPollInterval = null;
 function pollForVideo() {
-  if (videoMutObs) return;
+  if (videoMutObs || videoPollInterval) return;
+  const stop = () => {
+    if (videoMutObs) { videoMutObs.disconnect(); videoMutObs = null; }
+    if (videoPollInterval) { clearInterval(videoPollInterval); videoPollInterval = null; }
+  };
   videoMutObs = new MutationObserver(() => {
     const v = findVideo();
-    if (v) { videoMutObs.disconnect(); videoMutObs = null; attachVideo(v); }
+    if (v) { stop(); attachVideo(v); }
   });
   videoMutObs.observe(document.documentElement, { childList: true, subtree: true });
+  // backup: periodic poll in case MutationObserver misses it (YouTube can be tricky)
+  videoPollInterval = setInterval(() => {
+    const v = findVideo();
+    if (v) { stop(); attachVideo(v); }
+  }, 500);
 }
 
 const _v0 = findVideo();
@@ -533,6 +564,14 @@ function buildOverlay() {
   `;
 
   wireOverlay();
+
+  // if video was attached before overlay was built, log it now
+  if (videoFoundPending || videoEl) {
+    videoFoundPending = false;
+    appendSys('video found — sync ready 🎬');
+  } else {
+    appendSys('no video on this page yet — waiting…');
+  }
 }
 
 function wireOverlay() {
