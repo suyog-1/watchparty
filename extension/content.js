@@ -60,18 +60,21 @@ let videoPollInterval = null;
 let shadow = null;
 
 function findVideo() {
+  // YouTube-specific: main player has class 'html5-main-video'
+  const yt = document.querySelector('video.html5-main-video');
+  if (yt) return yt;
+
   const all = [...document.querySelectorAll('video')];
   if (!all.length) return null;
-  // 1st pref: video that's currently playing (it's clearly the main one)
+  // currently playing video is the main one
   const playing = all.find(v => !v.paused);
   if (playing) return playing;
-  // 2nd pref: video with significant duration (>30s — likely a movie, not a preview/thumbnail)
+  // long-duration video is likely the movie, not a preview
   const withDuration = all.filter(v => v.duration > 30 && isFinite(v.duration));
   if (withDuration.length) return withDuration.sort((a, b) => b.duration - a.duration)[0];
-  // 3rd pref: largest visible video
+  // largest visible video
   const sized = all.filter(v => v.videoWidth > 0 || v.offsetWidth > 100);
   if (sized.length) return sized.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
-  // fallback
   return all[0];
 }
 
@@ -185,7 +188,6 @@ function pollForVideo() {
   videoMutObs.observe(document.documentElement, { childList: true, subtree: true });
   // backup: periodic poll in case MutationObserver misses it (YouTube can be tricky)
   videoPollInterval = setInterval(() => {
-    if (!extContextValid()) { stop(); return; }
     const v = findVideo();
     if (v) { stop(); attachVideo(v); }
   }, 500);
@@ -204,7 +206,12 @@ if (IS_TOP) {
     if (!inRoom) return;
     if (!videoEl) {
       heartbeatLoggedNoVideo++;
-      if (heartbeatLoggedNoVideo === 5) appendSys('⚠️ no video detected on this page yet');
+      if (heartbeatLoggedNoVideo === 5) {
+        const count = document.querySelectorAll('video').length;
+        appendSys(`⚠️ no video attached yet (${count} <video> tags on page)`);
+        // restart polling in case it was stopped
+        pollForVideo();
+      }
       return;
     }
     heartbeatLoggedNoVideo = 0;
