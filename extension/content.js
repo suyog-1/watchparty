@@ -197,7 +197,11 @@ function handleServerMsg(msg) {
     case 'members':
       overlaySetMembers(msg.members);
       break;
-    case 'peer-joined': appendSys(`${msg.username} ${pick(JOIN_MSGS)}`); break;
+    case 'peer-joined':
+      appendSys(`${msg.username} ${pick(JOIN_MSGS)}`);
+      // re-broadcast our URL so the new person gets pulled into our page
+      if (inRoom) setTimeout(() => wsSend({ type: 'url-change', url: location.href }), 200);
+      break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
     case 'playback':
       applyPlayback(msg.action, msg.currentTime);
