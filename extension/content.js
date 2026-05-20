@@ -43,10 +43,16 @@ let shadow = null;
 function findVideo() {
   const all = [...document.querySelectorAll('video')];
   if (!all.length) return null;
-  // prefer videos that are visible AND have intrinsic dimensions (loaded)
+  // 1st pref: video that's currently playing (it's clearly the main one)
+  const playing = all.find(v => !v.paused);
+  if (playing) return playing;
+  // 2nd pref: video with significant duration (>30s — likely a movie, not a preview/thumbnail)
+  const withDuration = all.filter(v => v.duration > 30 && isFinite(v.duration));
+  if (withDuration.length) return withDuration.sort((a, b) => b.duration - a.duration)[0];
+  // 3rd pref: largest visible video
   const sized = all.filter(v => v.videoWidth > 0 || v.offsetWidth > 100);
   if (sized.length) return sized.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
-  // fallback: any video element (might still be loading)
+  // fallback
   return all[0];
 }
 
@@ -105,21 +111,46 @@ function emitVideoEvent(action, currentTime) {
 
 function applyPlayback(action, currentTime) {
   if (!videoEl) {
-    // queue for when video appears (e.g. after auto-nav, page still loading)
     pendingPlayback = { action, currentTime };
     if (IS_TOP) appendSys('queued — waiting for video to load ⏳');
     return;
   }
   isSyncing = true;
-  if (Math.abs(videoEl.currentTime - currentTime) > 1.5) videoEl.currentTime = currentTime;
+  const oldTime = videoEl.currentTime;
+  const diff = Math.abs(oldTime - currentTime);
+  if (diff > 1.5) {
+    videoEl.currentTime = currentTime;
+    if (IS_TOP) appendSys(`🎯 seeked ${oldTime.toFixed(0)}s → ${currentTime.toFixed(0)}s`);
+  }
   if (action === 'play') {
-    videoEl.play().catch(err => {
-      appendSys('autoplay blocked — click anywhere on the page 👆');
+    videoEl.play().catch(() => {
+      showAutoplayBanner();
     });
   } else {
     videoEl.pause();
   }
   setTimeout(() => { isSyncing = false; }, 500);
+}
+
+function showAutoplayBanner() {
+  if (document.getElementById('__dp_autoplay_banner__')) return;
+  const banner = document.createElement('div');
+  banner.id = '__dp_autoplay_banner__';
+  banner.style.cssText = [
+    'position:fixed','top:50%','left:50%','transform:translate(-50%,-50%)',
+    'z-index:2147483647','background:linear-gradient(135deg,#ff2d78,#a855f7)',
+    'color:#fff','padding:24px 32px','border-radius:16px',
+    'font-family:system-ui,sans-serif','font-size:1.2rem','font-weight:700',
+    'box-shadow:0 8px 40px #000a','cursor:pointer','text-align:center',
+    'max-width:80vw','animation:dp-pulse 1s ease-in-out infinite alternate',
+  ].join(';');
+  banner.innerHTML = '👆 click the video to start syncing<br><span style="font-size:.8rem;font-weight:400;opacity:.9">your browser is blocking auto-play</span>';
+  const style = document.createElement('style');
+  style.textContent = '@keyframes dp-pulse{from{transform:translate(-50%,-50%) scale(1)}to{transform:translate(-50%,-50%) scale(1.05)}}';
+  document.head.appendChild(style);
+  banner.onclick = () => { banner.remove(); style.remove(); if (videoEl) videoEl.play().catch(()=>{}); };
+  (document.fullscreenElement || document.body || document.documentElement).appendChild(banner);
+  setTimeout(() => { banner.remove(); style.remove(); }, 8000);
 }
 
 function pollForVideo() {
@@ -143,13 +174,17 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
-// Sync heartbeat every 2s:
-// - Host (room creator) broadcasts 'playback' → joiners auto-correct drift to host
-// - Joiner sends 'state-ping' → server updates state silently (for future late joiners)
-// This way only one side is "authority" so no sync wars, and drift is auto-corrected.
+// Sync heartbeat every 2s
+let heartbeatLoggedNoVideo = 0;
 if (IS_TOP) {
   setInterval(() => {
-    if (!inRoom || !videoEl) return;
+    if (!inRoom) return;
+    if (!videoEl) {
+      heartbeatLoggedNoVideo++;
+      if (heartbeatLoggedNoVideo === 5) appendSys('⚠️ no video detected on this page yet');
+      return;
+    }
+    heartbeatLoggedNoVideo = 0;
     wsSend({
       type: isHost ? 'playback' : 'state-ping',
       action: videoEl.paused ? 'pause' : 'play',
@@ -274,7 +309,7 @@ function handleServerMsg(msg) {
       inRoom = true;
       isHost = true; // we created the room — we're the sync authority
       overlaySetRoom(msg.roomId);
-      appendSys("you're in! 🎉 share the code w bae");
+      appendSys("you're in! 🎉 you're the HOST — sync flows from your video");
       wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
       break;
@@ -293,7 +328,7 @@ function handleServerMsg(msg) {
         setTimeout(() => { location.href = msg.lastUrl; }, 800);
         break;
       }
-      appendSys("you're in! 🎉 waiting for video to sync…");
+      appendSys("you're in! 🎉 you're the JOINER — follow the host's video");
       attachVideoOrPoll();
       break;
     case 'error':
