@@ -1,46 +1,55 @@
-// Routes messages between frames within a tab.
-// Content scripts can't talk to each other directly across frames,
-// so they go through here.
-//
-// tabId → { videoFrameId }  — tracks which frame holds the <video> element
+// Routes messages between frames + tracks active connection globally
 
-const tabState = {};
+const videoFrames = {}; // tabId → frameId of frame holding <video>
+let activeConn    = null; // { tabId, roomId } — only one party at a time
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  const tabId = sender.tab?.id;
-  if (tabId === undefined) { sendResponse({}); return true; }
+  const tabId       = sender.tab?.id;
   const senderFrame = sender.frameId ?? 0;
 
   switch (msg.type) {
 
-    // A content script found a <video> — remember its frame.
-    // If it's an iframe, alert the main frame so it routes sync there.
+    // ── frame routing ──────────────────────────────────────────────────────
     case 'register-video-frame':
-      tabState[tabId] = { videoFrameId: senderFrame };
-      if (senderFrame !== 0) {
-        chrome.tabs.sendMessage(tabId, { type: 'video-in-iframe', frameId: senderFrame }, { frameId: 0 }).catch(() => {});
+      if (tabId !== undefined) {
+        videoFrames[tabId] = senderFrame;
+        if (senderFrame !== 0) {
+          chrome.tabs.sendMessage(tabId, { type: 'video-in-iframe', frameId: senderFrame }, { frameId: 0 }).catch(() => {});
+        }
       }
-      sendResponse({ ok: true });
-      break;
+      sendResponse({ ok: true }); break;
 
-    // Video play/pause/seeked from inside an iframe — forward to main frame (which owns the WS)
     case 'iframe-video-event':
-      chrome.tabs.sendMessage(tabId, { type: 'local-video-event', action: msg.action, currentTime: msg.currentTime }, { frameId: 0 }).catch(() => {});
-      sendResponse({ ok: true });
-      break;
+      if (tabId !== undefined) {
+        chrome.tabs.sendMessage(tabId, { type: 'local-video-event', action: msg.action, currentTime: msg.currentTime }, { frameId: 0 }).catch(() => {});
+      }
+      sendResponse({ ok: true }); break;
 
-    // Main frame wants to apply playback to a video that's in an iframe
     case 'apply-to-video-frame': {
-      const vfid = tabState[tabId]?.videoFrameId;
+      const vfid = videoFrames[tabId]?.frameId ?? videoFrames[tabId];
       if (vfid !== undefined && vfid !== 0) {
         chrome.tabs.sendMessage(tabId, { type: 'apply-playback', action: msg.action, currentTime: msg.currentTime }, { frameId: vfid }).catch(() => {});
       }
-      sendResponse({ ok: true });
-      break;
+      sendResponse({ ok: true }); break;
     }
+
+    // ── connection tracking (one party at a time) ──────────────────────────
+    case 'get-connection':
+      sendResponse({ conn: activeConn }); break;
+
+    case 'set-connection':
+      activeConn = msg.roomId ? { tabId: msg.tabId ?? tabId, roomId: msg.roomId } : null;
+      sendResponse({ ok: true }); break;
+
+    case 'focus-tab':
+      if (msg.tabId) chrome.tabs.update(msg.tabId, { active: true }).catch(() => {});
+      sendResponse({ ok: true }); break;
   }
 
   return true;
 });
 
-chrome.tabs.onRemoved.addListener(tabId => delete tabState[tabId]);
+chrome.tabs.onRemoved.addListener(tabId => {
+  delete videoFrames[tabId];
+  if (activeConn?.tabId === tabId) activeConn = null;
+});

@@ -74,6 +74,17 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
+// ── URL CHANGE DETECTION (main frame only) ────────────────────────────────────
+if (IS_TOP) {
+  let lastUrl = location.href;
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      if (roomId) wsSend({ type: 'url-change', url: location.href });
+    }
+  }).observe(document, { subtree: true, childList: true });
+}
+
 // ── MESSAGE LISTENER (all frames) ────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -110,12 +121,11 @@ function handleTopMsg(msg, sendResponse) {
   }
 }
 
-function connectWS(serverUrl, action, rid, uname) {
+function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   if (ws) { ws.onclose = null; ws.close(); }
 
-  // show overlay immediately so user knows something is happening
   showOverlay();
-  appendSys('connecting… give it a sec 🔄');
+  appendSys(attempt === 1 ? 'connecting… give it a sec 🔄' : `retrying… (${attempt}/3) 🔄`);
 
   const wsUrl = serverUrl.replace(/^https/, 'wss').replace(/^http/, 'ws');
   ws = new WebSocket(wsUrl);
@@ -129,14 +139,23 @@ function connectWS(serverUrl, action, rid, uname) {
   ws.onmessage = (e) => { try { handleServerMsg(JSON.parse(e.data)); } catch (_) {} };
 
   ws.onclose = () => {
-    roomId = null;
-    appendSys('disconnected 😭 reload n rejoin');
-    chrome.runtime.sendMessage({ type: 'ws-closed' }).catch(() => {});
+    if (roomId) {
+      // was connected, now dropped
+      roomId = null;
+      chrome.runtime.sendMessage({ type: 'set-connection', roomId: null }).catch(() => {});
+      appendSys('disconnected 😭 open the extension to rejoin');
+      chrome.runtime.sendMessage({ type: 'ws-closed' }).catch(() => {});
+    }
   };
 
   ws.onerror = () => {
-    appendSys('connection failed 💀 check server url in popup');
-    chrome.runtime.sendMessage({ type: 'error', message: 'connection failed 💀' }).catch(() => {});
+    if (attempt < 3) {
+      // auto-retry — Render free tier takes ~30s to wake up
+      setTimeout(() => connectWS(serverUrl, action, rid, uname, attempt + 1), 10000);
+    } else {
+      appendSys('still can't connect 💀 render might be down, try again later');
+      chrome.runtime.sendMessage({ type: 'error', message: 'could not connect after 3 tries 💀' }).catch(() => {});
+    }
   };
 }
 
@@ -150,8 +169,12 @@ function handleServerMsg(msg) {
     case 'joined':
       roomId = msg.roomId;
       overlaySetRoom(msg.roomId);
+      // register with background so popup knows we're connected
+      chrome.runtime.sendMessage({ type: 'set-connection', roomId: msg.roomId }).catch(() => {});
       chrome.runtime.sendMessage({ type: 'connected', roomId: msg.roomId }).catch(() => {});
-      appendSys("you're in! 🎉 open a movie n press play");
+      appendSys("you're in! 🎉 open a movie and press play");
+      // broadcast current URL so partner can navigate here
+      wsSend({ type: 'url-change', url: location.href });
       const v = findVideo(); if (v) attachVideo(v); else pollForVideo();
       break;
     case 'error':
@@ -172,10 +195,11 @@ function handleServerMsg(msg) {
       }
       appendSys(`${msg.from} ${msg.action === 'play' ? pick(PLAY_MSGS) : pick(PAUSE_MSGS)}`);
       break;
-    case 'chat':      appendChat(msg.username, msg.text); break;
-    case 'gif':       appendGif(msg.username, msg.url);  break;
-    case 'reaction':  popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
-    case 'jumpscare': doJumpscare(msg.username); break;
+    case 'chat':       appendChat(msg.username, msg.text); break;
+    case 'gif':        appendGif(msg.username, msg.url);  break;
+    case 'reaction':   popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
+    case 'jumpscare':  doJumpscare(msg.username); break;
+    case 'url-change': appendUrlNotif(msg.username, msg.url); break;
   }
 }
 
@@ -495,6 +519,29 @@ function overlaySetMembers(m) {
 
 function appendChat(who, text) { if (shadow) append(false, who, text); }
 function appendSys(text)       { if (shadow) append(true,  '•',  text); }
+
+function appendUrlNotif(who, url) {
+  if (!shadow) return;
+  const log = shadow.getElementById('log');
+  const el  = document.createElement('div');
+  el.className = 'm s';
+  const whoEl = document.createElement('span');
+  whoEl.className = 'who';
+  whoEl.textContent = '•';
+  const txtEl = document.createElement('span');
+  txtEl.className = 'txt';
+  txtEl.textContent = `${who} opened something — `;
+  const a = document.createElement('a');
+  a.textContent = 'open it too →';
+  a.href = '#';
+  a.style.cssText = 'color:#ff2d78;font-weight:700;text-decoration:none;';
+  a.onclick = (e) => { e.preventDefault(); location.href = url; };
+  txtEl.appendChild(a);
+  el.appendChild(whoEl);
+  el.appendChild(txtEl);
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
 
 function appendGif(who, url) {
   if (!shadow) return;

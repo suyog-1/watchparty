@@ -2,28 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>no skip zone 💀</title>
+  <title>daddy's party 🎬</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Bangers&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
 
+  <!-- connect -->
   <div id="screen-connect">
     <div class="brand">
       <h1>DADDY'S PARTY</h1>
-      <p class="tagline">cinema for two 🎬 no subscription needed bestie</p>
+      <p class="tagline">cinema for two 🎬</p>
     </div>
 
     <div class="field">
       <label>your name</label>
-      <input id="username" type="text" placeholder="e.g. daddy 💀" maxlength="20" autocomplete="nope" />
-    </div>
-
-    <div class="field">
-      <label>server url</label>
-      <input id="server-url" type="text" placeholder="https://your-app.railway.app" autocomplete="nope" />
-      <span class="hint">deploy once on railway.app (free) — see readme</span>
+      <input id="username" type="text" placeholder="e.g. daddy" maxlength="20" autocomplete="nope" />
     </div>
 
     <button id="create-btn" class="btn primary">🎬 start the party</button>
@@ -31,23 +26,37 @@
     <div class="divider">already got a code?</div>
 
     <div class="row">
-      <input id="room-code" type="text" placeholder="XXXXXX" maxlength="6" autocomplete="off" />
+      <input id="room-code" type="text" placeholder="room code" maxlength="6" autocomplete="nope" />
       <button id="join-btn" class="btn secondary">join 🍿</button>
     </div>
 
     <p id="error-msg" class="error hidden"></p>
   </div>
 
+  <!-- already connected in another tab -->
+  <div id="screen-other-tab" class="hidden">
+    <div class="brand">
+      <h1>DADDY'S PARTY</h1>
+    </div>
+    <div class="already-box">
+      <p class="already-emoji">🎬</p>
+      <p class="already-text">you're already in a party</p>
+      <p class="already-sub">go back to the tab you started it in</p>
+    </div>
+    <button id="goto-tab-btn" class="btn primary">take me there →</button>
+    <button id="leave-other-btn" class="btn danger">leave that party first</button>
+  </div>
+
+  <!-- connected -->
   <div id="screen-connected" class="hidden">
     <div class="brand">
       <h1>DADDY'S PARTY</h1>
-      <p class="tagline">you're in bestie 🫶</p>
+      <p class="tagline">you're in 🫶</p>
     </div>
-
     <div class="connected-box">
       <div class="info-row">
         <div>
-          <div class="label">room code (click to copy)</div>
+          <div class="label">room code</div>
           <div id="display-code" class="code"></div>
         </div>
         <div>
@@ -56,11 +65,7 @@
         </div>
       </div>
     </div>
-
-    <div class="tip">
-      👀 look for the <strong>no skip zone</strong> panel in the <strong>bottom-right</strong> corner of the streaming site — that's where the chat &amp; gifs live
-    </div>
-
+    <p class="tip">chat panel is in the bottom-right of the streaming tab 👀</p>
     <button id="leave-btn" class="btn danger">💀 leave room</button>
   </div>
 

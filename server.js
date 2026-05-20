@@ -108,6 +108,13 @@ wss.on('connection', (ws) => {
         broadcastAll(roomId, { type: 'jumpscare', username });
         break;
       }
+
+      case 'url-change': {
+        if (!roomId || !rooms[roomId]) return;
+        const username = rooms[roomId].members.get(ws)?.username || 'someone';
+        broadcast(roomId, { type: 'url-change', url: msg.url, username }, ws);
+        break;
+      }
     }
   });
 

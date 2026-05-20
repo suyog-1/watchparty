@@ -1,72 +1,111 @@
-const DEFAULT_SERVER = 'https://watchparty-ayjl.onrender.com';
+// server url is hardcoded — neither person needs to type anything
+const SERVER_URL = 'https://watchparty-ayjl.onrender.com';
 
 const screenConnect   = document.getElementById('screen-connect');
+const screenOtherTab  = document.getElementById('screen-other-tab');
 const screenConnected = document.getElementById('screen-connected');
-const usernameInput   = document.getElementById('username');
-const serverUrlInput  = document.getElementById('server-url');
-const roomCodeInput   = document.getElementById('room-code');
-const createBtn       = document.getElementById('create-btn');
-const joinBtn         = document.getElementById('join-btn');
-const errorMsg        = document.getElementById('error-msg');
-const displayCode     = document.getElementById('display-code');
-const displayMembers  = document.getElementById('display-members');
-const leaveBtn        = document.getElementById('leave-btn');
+
+const usernameInput  = document.getElementById('username');
+const roomCodeInput  = document.getElementById('room-code');
+const createBtn      = document.getElementById('create-btn');
+const joinBtn        = document.getElementById('join-btn');
+const errorMsg       = document.getElementById('error-msg');
+
+const gotoTabBtn     = document.getElementById('goto-tab-btn');
+const leaveOtherBtn  = document.getElementById('leave-other-btn');
+
+const displayCode    = document.getElementById('display-code');
+const displayMembers = document.getElementById('display-members');
+const leaveBtn       = document.getElementById('leave-btn');
 
 let connectTimeout = null;
+let otherTabId     = null;
 
-// restore saved prefs
-chrome.storage.sync.get(['username', 'serverUrl'], (data) => {
-  if (data.username)  usernameInput.value  = data.username;
-  serverUrlInput.value = data.serverUrl || DEFAULT_SERVER;
+// ── INIT: check if already in a party anywhere ────────────────────────────────
+
+chrome.storage.sync.get(['username'], d => {
+  if (d.username) usernameInput.value = d.username;
 });
 
-// check if already connected in this tab
-sendToContent({ type: 'status' }, (res) => {
-  if (res?.connected && res?.roomId) showConnected(res.roomId);
+chrome.runtime.sendMessage({ type: 'get-connection' }, (res) => {
+  const conn = res?.conn;
+  if (!conn) return; // not connected anywhere
+
+  // check if it's this tab or another
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const thisTabId = tabs[0]?.id;
+    if (conn.tabId === thisTabId) {
+      // same tab — show connected screen
+      showConnected(conn.roomId);
+    } else {
+      // different tab — show "go back" screen
+      otherTabId = conn.tabId;
+      show(screenOtherTab);
+    }
+  });
 });
 
-// listen for updates from content script
+// ── LISTENERS ─────────────────────────────────────────────────────────────────
+
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'connected')  { clearTimeout(connectTimeout); showConnected(msg.roomId); }
-  if (msg.type === 'ws-closed')  { resetBtn(); showConnect(); }
-  if (msg.type === 'error')      { resetBtn(); showError(msg.message); }
+  if (msg.type === 'ws-closed')  { resetBtns(); show(screenConnect); }
+  if (msg.type === 'error')      { resetBtns(); showError(msg.message); }
   if (msg.type === 'members')    { displayMembers.textContent = msg.members.join(' & '); }
 });
 
-// create
+// ── CREATE ────────────────────────────────────────────────────────────────────
+
 createBtn.addEventListener('click', () => {
-  const { username, serverUrl } = getInputs();
-  if (!username)  return showError('enter your name first');
-  if (!serverUrl) return showError('enter the server url');
-  savePrefs(username, serverUrl);
-  setConnecting(createBtn, '🔄 connecting...');
-  sendToContent({ type: 'connect', action: 'create', username, serverUrl });
+  const username = usernameInput.value.trim();
+  if (!username) return showError('enter your name first');
+  chrome.storage.sync.set({ username });
+  setBusy(createBtn, '🔄 connecting...');
+  sendToContent({ type: 'connect', action: 'create', username, serverUrl: SERVER_URL });
   armTimeout();
 });
 
-// join
+// ── JOIN ──────────────────────────────────────────────────────────────────────
+
 joinBtn.addEventListener('click', doJoin);
 roomCodeInput.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
 
 function doJoin() {
-  const { username, serverUrl } = getInputs();
-  const roomId = roomCodeInput.value.trim().toUpperCase();
-  if (!username)  return showError('enter your name first');
-  if (!serverUrl) return showError('enter the server url');
-  if (!roomId)    return showError('enter a room code');
-  savePrefs(username, serverUrl);
-  setConnecting(joinBtn, '🔄 joining...');
-  sendToContent({ type: 'connect', action: 'join', username, serverUrl, roomId });
+  const username = usernameInput.value.trim();
+  const roomId   = roomCodeInput.value.trim().toUpperCase();
+  if (!username) return showError('enter your name first');
+  if (!roomId)   return showError('enter the room code');
+  chrome.storage.sync.set({ username });
+  setBusy(joinBtn, '🔄 joining...');
+  sendToContent({ type: 'connect', action: 'join', username, serverUrl: SERVER_URL, roomId });
   armTimeout();
 }
 
-// leave
-leaveBtn.addEventListener('click', () => {
-  sendToContent({ type: 'disconnect' });
-  showConnect();
+// ── OTHER TAB SCREEN ──────────────────────────────────────────────────────────
+
+gotoTabBtn.addEventListener('click', () => {
+  if (otherTabId) chrome.runtime.sendMessage({ type: 'focus-tab', tabId: otherTabId });
+  window.close();
 });
 
-// copy code
+leaveOtherBtn.addEventListener('click', () => {
+  if (otherTabId) {
+    chrome.tabs.sendMessage(otherTabId, { type: 'disconnect' }).catch(() => {});
+  }
+  otherTabId = null;
+  show(screenConnect);
+});
+
+// ── LEAVE ─────────────────────────────────────────────────────────────────────
+
+leaveBtn.addEventListener('click', () => {
+  sendToContent({ type: 'disconnect' });
+  resetBtns();
+  show(screenConnect);
+});
+
+// ── COPY CODE ─────────────────────────────────────────────────────────────────
+
 displayCode.addEventListener('click', () => {
   navigator.clipboard.writeText(displayCode.textContent).then(() => {
     const orig = displayCode.textContent;
@@ -75,25 +114,25 @@ displayCode.addEventListener('click', () => {
   });
 });
 
-// ── helpers ──
+// ── HELPERS ───────────────────────────────────────────────────────────────────
 
-function getInputs() {
-  return {
-    username:  usernameInput.value.trim(),
-    serverUrl: serverUrlInput.value.trim().replace(/\/$/, ''),
-  };
+function show(el) {
+  [screenConnect, screenOtherTab, screenConnected].forEach(s => s.classList.add('hidden'));
+  el.classList.remove('hidden');
 }
 
-function savePrefs(username, serverUrl) {
-  chrome.storage.sync.set({ username, serverUrl });
+function showConnected(roomId) {
+  clearTimeout(connectTimeout);
+  displayCode.textContent = roomId;
+  show(screenConnected);
 }
 
-function setConnecting(btn, label) {
+function setBusy(btn, label) {
   btn.textContent = label;
   btn.disabled = true;
 }
 
-function resetBtn() {
+function resetBtns() {
   createBtn.textContent = '🎬 start the party';
   createBtn.disabled = false;
   joinBtn.textContent = 'join 🍿';
@@ -103,22 +142,9 @@ function resetBtn() {
 function armTimeout() {
   clearTimeout(connectTimeout);
   connectTimeout = setTimeout(() => {
-    resetBtn();
-    showError("server's waking up — try again in 10s 😴");
-  }, 12000);
-}
-
-function showConnected(roomId) {
-  clearTimeout(connectTimeout);
-  screenConnect.classList.add('hidden');
-  screenConnected.classList.remove('hidden');
-  displayCode.textContent = roomId;
-}
-
-function showConnect() {
-  resetBtn();
-  screenConnected.classList.add('hidden');
-  screenConnect.classList.remove('hidden');
+    resetBtns();
+    showError("server's waking up 😴 try again in 15s");
+  }, 15000);
 }
 
 function showError(msg) {
