@@ -28,11 +28,16 @@ let videoEl     = null;
 let isSyncing   = false;
 let videoMutObs = null;
 let inRoom      = false;
+let pendingPlayback = null; // queued playback event waiting for videoEl
 
 function findVideo() {
-  return [...document.querySelectorAll('video')]
-    .filter(v => v.offsetWidth > 0 && v.offsetHeight > 0)
-    .sort((a, b) => b.videoWidth * b.videoHeight - a.videoWidth * a.videoHeight)[0] || null;
+  const all = [...document.querySelectorAll('video')];
+  if (!all.length) return null;
+  // prefer videos that are visible AND have intrinsic dimensions (loaded)
+  const sized = all.filter(v => v.videoWidth > 0 || v.offsetWidth > 100);
+  if (sized.length) return sized.sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0];
+  // fallback: any video element (might still be loading)
+  return all[0];
 }
 
 function attachVideo(video) {
@@ -43,6 +48,14 @@ function attachVideo(video) {
   video.addEventListener('pause',  onPause);
   video.addEventListener('seeked', onSeeked);
   chrome.runtime.sendMessage({ type: 'register-video-frame' }).catch(() => {});
+  if (IS_TOP) appendSys('video found — sync ready 🎬');
+
+  // apply any playback event that arrived before the video was ready
+  if (pendingPlayback) {
+    const p = pendingPlayback;
+    pendingPlayback = null;
+    setTimeout(() => applyPlayback(p.action, p.currentTime), 200);
+  }
 }
 
 function detachVideo() {
@@ -63,10 +76,21 @@ function emitVideoEvent(action, currentTime) {
 }
 
 function applyPlayback(action, currentTime) {
-  if (!videoEl) return;
+  if (!videoEl) {
+    // queue for when video appears (e.g. after auto-nav, page still loading)
+    pendingPlayback = { action, currentTime };
+    if (IS_TOP) appendSys('queued — waiting for video to load ⏳');
+    return;
+  }
   isSyncing = true;
   if (Math.abs(videoEl.currentTime - currentTime) > 1.5) videoEl.currentTime = currentTime;
-  action === 'play' ? videoEl.play().catch(() => {}) : videoEl.pause();
+  if (action === 'play') {
+    videoEl.play().catch(err => {
+      appendSys('autoplay blocked — click anywhere on the page 👆');
+    });
+  } else {
+    videoEl.pause();
+  }
   setTimeout(() => { isSyncing = false; }, 500);
 }
 
@@ -193,15 +217,17 @@ function handleServerMsg(msg) {
     case 'joined':
       inRoom = true;
       overlaySetRoom(msg.roomId);
+      // queue the room's current playback state so we sync to where host is
+      if (msg.state && (msg.state.playing || msg.state.currentTime > 0)) {
+        pendingPlayback = { action: msg.state.playing ? 'play' : 'pause', currentTime: msg.state.currentTime };
+      }
       // if room already has a URL, auto-navigate there
       if (msg.lastUrl && msg.lastUrl !== location.href) {
         appendSys(`taking you to where they're watching… 🎬`);
         setTimeout(() => { location.href = msg.lastUrl; }, 800);
         break;
       }
-      // no URL yet — sit tight, host will broadcast on peer-joined
-      // (do NOT broadcast our own URL — we're the follower, not the leader)
-      appendSys("you're in! 🎉 waiting for them to share a page…");
+      appendSys("you're in! 🎉 waiting for video to sync…");
       attachVideoOrPoll();
       break;
     case 'error':
