@@ -76,9 +76,6 @@ createBtn.addEventListener('click', async () => {
   const tab = await getActiveTab();
   if (!tab) return showError("can't read the active tab 💀");
 
-  const hasVideo = await checkTabHasVideo(tab.id);
-  if (!hasVideo) return showError('no video on this page 💀 open a movie first');
-
   chrome.storage.sync.set({ username });
   setBusy(createBtn, '🔄 connecting...');
   chrome.runtime.sendMessage({

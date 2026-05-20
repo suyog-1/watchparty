@@ -338,7 +338,7 @@ function buildOverlay() {
   const host = document.createElement('div');
   host.id = '__daddysparty__';
   host.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647;';
-  document.documentElement.appendChild(host);
+  (document.fullscreenElement || document.documentElement).appendChild(host);
   shadow = host.attachShadow({ mode: 'open' });
 
   shadow.innerHTML = `
@@ -490,7 +490,20 @@ function showPill() {
   ].join(';');
   pill.textContent = "🎬 daddy's party";
   pill.onclick = () => { showOverlay(); };
-  document.documentElement.appendChild(pill);
+  (document.fullscreenElement || document.documentElement).appendChild(pill);
+}
+
+// When fullscreen state changes, move the overlay/pill to the fullscreen element
+// so it stays visible over fullscreen video (YouTube, Netflix, etc.)
+if (IS_TOP) {
+  document.addEventListener('fullscreenchange', () => {
+    const fsEl = document.fullscreenElement;
+    const target = fsEl || document.documentElement;
+    const host = document.getElementById('__daddysparty__');
+    if (host && host.parentElement !== target) target.appendChild(host);
+    const pill = document.getElementById('__dp_pill__');
+    if (pill && pill.parentElement !== target) target.appendChild(pill);
+  });
 }
 
 function removePill() {
