@@ -29,16 +29,27 @@ chrome.storage.sync.get(['username'], d => {
 
 chrome.runtime.sendMessage({ type: 'get-connection' }, (res) => {
   const conn = res?.conn;
-  if (!conn) return; // not connected anywhere
+  if (!conn) return;
 
-  // check if it's this tab or another
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const thisTabId = tabs[0]?.id;
+
+    if (conn.roomId === 'CONNECTING') {
+      // still connecting — show a waiting state, don't let them start another
+      if (conn.tabId === thisTabId) {
+        createBtn.textContent = '🔄 connecting...';
+        createBtn.disabled = true;
+        joinBtn.disabled = true;
+      } else {
+        otherTabId = conn.tabId;
+        show(screenOtherTab);
+      }
+      return;
+    }
+
     if (conn.tabId === thisTabId) {
-      // same tab — show connected screen
       showConnected(conn.roomId);
     } else {
-      // different tab — show "go back" screen
       otherTabId = conn.tabId;
       show(screenOtherTab);
     }

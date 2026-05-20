@@ -38,6 +38,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ conn: activeConn }); break;
 
     case 'set-connection':
+      // roomId can be an actual id, 'CONNECTING', or null
       activeConn = msg.roomId ? { tabId: msg.tabId ?? tabId, roomId: msg.roomId } : null;
       sendResponse({ ok: true }); break;
 

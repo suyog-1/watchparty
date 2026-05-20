@@ -124,6 +124,9 @@ function handleTopMsg(msg, sendResponse) {
 function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   if (ws) { ws.onclose = null; ws.close(); }
 
+  // tell background we're connecting so popup doesn't think it reset
+  chrome.runtime.sendMessage({ type: 'set-connection', roomId: 'CONNECTING' }).catch(() => {});
+
   showOverlay();
   appendSys(attempt === 1 ? 'connecting… give it a sec 🔄' : `retrying… (${attempt}/3) 🔄`);
 
@@ -420,12 +423,8 @@ function wireOverlay() {
     shadow.getElementById('minbtn').textContent = mini ? '▴' : '▾';
   };
 
-  // leave
-  shadow.getElementById('xbtn').onclick = () => {
-    if (ws) { ws.onclose = null; ws.close(); ws = null; }
-    roomId = null;
-    hideOverlay();
-  };
+  // X = hide overlay only, stay connected
+  shadow.getElementById('xbtn').onclick = () => hideOverlay();
 
   // copy code
   shadow.getElementById('code-chip').onclick = () => {
@@ -505,8 +504,38 @@ function doChat() {
 
 // ── OVERLAY HELPERS ───────────────────────────────────────────────────────────
 
-function showOverlay()  { if (!shadow) buildOverlay(); shadow.host.style.display = 'block'; }
-function hideOverlay()  { if (shadow) shadow.host.style.display = 'none'; }
+function showOverlay() {
+  if (!shadow) buildOverlay();
+  shadow.host.style.display = 'block';
+  removePill();
+}
+
+function hideOverlay() {
+  if (shadow) shadow.host.style.display = 'none';
+  if (roomId) showPill(); // only show pill if still connected
+}
+
+function showPill() {
+  if (document.getElementById('__dp_pill__')) return;
+  const pill = document.createElement('div');
+  pill.id = '__dp_pill__';
+  pill.style.cssText = [
+    'position:fixed', 'bottom:20px', 'right:20px', 'z-index:2147483647',
+    'background:linear-gradient(135deg,#ff2d78,#a855f7)',
+    'color:#fff', 'border-radius:20px', 'padding:8px 14px',
+    'font-family:system-ui,sans-serif', 'font-size:.78rem', 'font-weight:700',
+    'cursor:pointer', 'box-shadow:0 4px 16px #ff2d7850',
+    'display:flex', 'align-items:center', 'gap:6px', 'user-select:none',
+  ].join(';');
+  pill.textContent = "🎬 daddy's party";
+  pill.onclick = () => { showOverlay(); };
+  document.documentElement.appendChild(pill);
+}
+
+function removePill() {
+  const pill = document.getElementById('__dp_pill__');
+  if (pill) pill.remove();
+}
 
 function overlaySetRoom(id) {
   if (!shadow) return;
@@ -557,6 +586,8 @@ function appendGif(who, url) {
 }
 
 function append(sys, who, text) {
+  // if overlay hidden and this is an incoming message, pop it back up
+  if (shadow?.host.style.display === 'none') showOverlay();
   const log = shadow.getElementById('log');
   const el  = document.createElement('div');
   el.className = sys ? 'm s' : 'm';
