@@ -174,22 +174,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ── SERVER MESSAGE HANDLER ───────────────────────────────────────────────────
 
+function attachVideoOrPoll() {
+  const v = findVideo();
+  if (v) attachVideo(v); else pollForVideo();
+}
+
 function handleServerMsg(msg) {
   switch (msg.type) {
     case 'created':
+      inRoom = true;
+      overlaySetRoom(msg.roomId);
+      appendSys("you're in! 🎉 share the code w bae");
+      // host broadcasts current URL so future joiners get it
+      wsSend({ type: 'url-change', url: location.href });
+      attachVideoOrPoll();
+      break;
+
     case 'joined':
       inRoom = true;
       overlaySetRoom(msg.roomId);
-      appendSys("you're in! 🎉");
-      // if we joined a room that already has a URL, auto-navigate there
-      if (msg.type === 'joined' && msg.lastUrl && msg.lastUrl !== location.href) {
+      // if room already has a URL, auto-navigate there
+      if (msg.lastUrl && msg.lastUrl !== location.href) {
         appendSys(`taking you to where they're watching… 🎬`);
         setTimeout(() => { location.href = msg.lastUrl; }, 800);
         break;
       }
-      // broadcast our current URL so partner can follow
-      wsSend({ type: 'url-change', url: location.href });
-      const v = findVideo(); if (v) attachVideo(v); else pollForVideo();
+      // no URL yet — sit tight, host will broadcast on peer-joined
+      // (do NOT broadcast our own URL — we're the follower, not the leader)
+      appendSys("you're in! 🎉 waiting for them to share a page…");
+      attachVideoOrPoll();
       break;
     case 'error':
       appendSys(msg.message + ' 💀');
