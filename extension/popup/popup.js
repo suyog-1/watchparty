@@ -77,8 +77,16 @@ createBtn.addEventListener('click', async () => {
   if (!tab) return showError("can't read the active tab 💀");
 
   // make sure the latest content script is running on this tab
-  const ready = await ensureContentScript(tab.id);
-  if (!ready) return showError('refresh this tab (F5) then try again ⟳');
+  const result = await ensureContentScript(tab.id);
+  if (!result.ok) {
+    if (result.reason?.includes('Cannot access') || result.reason?.includes('chrome:')) {
+      return showError('open any normal website first — chrome:// pages are blocked');
+    }
+    if (result.reason?.includes('blocking')) {
+      return showError('site is blocking extension. lower Brave shields/adblocker for this site 🛡️');
+    }
+    return showError('refresh tab (F5) — if still nothing, check Brave shields 🛡️');
+  }
 
   chrome.storage.sync.set({ username });
   setBusy(createBtn, '🔄 connecting...');
@@ -100,8 +108,16 @@ async function doJoin() {
   const tab = await getActiveTab();
   if (!tab) return showError("can't read the active tab 💀");
 
-  const ready = await ensureContentScript(tab.id);
-  if (!ready) return showError('refresh this tab (F5) then try again ⟳');
+  const result = await ensureContentScript(tab.id);
+  if (!result.ok) {
+    if (result.reason?.includes('Cannot access') || result.reason?.includes('chrome:')) {
+      return showError('open any normal website first — chrome:// pages are blocked');
+    }
+    if (result.reason?.includes('blocking')) {
+      return showError('site is blocking extension. lower Brave shields/adblocker for this site 🛡️');
+    }
+    return showError('refresh tab (F5) — if still nothing, check Brave shields 🛡️');
+  }
 
   chrome.storage.sync.set({ username });
   setBusy(joinBtn, '🔄 joining...');
@@ -193,7 +209,7 @@ function pingContentScript(tabId) {
 
 async function ensureContentScript(tabId) {
   // first try a ping — if the latest content script is loaded, we're done
-  if (await pingContentScript(tabId)) return true;
+  if (await pingContentScript(tabId)) return { ok: true };
 
   // not loaded (or old version w/o ping handler) — try to inject fresh
   try {
@@ -201,11 +217,12 @@ async function ensureContentScript(tabId) {
       target: { tabId },
       files: ['content.js'],
     });
-    // wait a moment for listeners to register
-    await new Promise(r => setTimeout(r, 200));
-    return await pingContentScript(tabId);
+    // wait longer for listeners to register (some browsers slower)
+    await new Promise(r => setTimeout(r, 500));
+    if (await pingContentScript(tabId)) return { ok: true };
+    return { ok: false, reason: 'injected but no response — site may be blocking extensions' };
   } catch (e) {
-    // can't inject — probably chrome:// page or other restricted URL
-    return false;
+    console.error('[daddys party] inject failed:', e);
+    return { ok: false, reason: e?.message || 'unknown error' };
   }
 }
