@@ -106,8 +106,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
 
     case 'iframe-video-event':
-      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN) {
+      // real user action in iframe — always broadcast as playback
+      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
         ws.send(JSON.stringify({ type: 'playback', action: msg.action, currentTime: msg.currentTime }));
+      }
+      sendResponse({ ok: true }); break;
+
+    case 'iframe-heartbeat':
+      // periodic heartbeat from iframe — host broadcasts as playback, joiner sends state-ping
+      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
+        ws.send(JSON.stringify({
+          type: isHost ? 'playback' : 'state-ping',
+          action: msg.action,
+          currentTime: msg.currentTime,
+        }));
       }
       sendResponse({ ok: true }); break;
 
@@ -181,8 +193,20 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
       lastState = { action: data.action, currentTime: data.currentTime };
     }
 
-    // forward all server messages to the active tab's content script
+    // forward all server messages to the active tab's main frame (for overlay)
     notifyTab({ type: 'ws-msg', data });
+
+    // additionally: if video is in an iframe, send apply-playback directly to that iframe
+    if (data.type === 'playback' && activeTabId !== null) {
+      const vfid = videoFrames[activeTabId];
+      if (vfid !== undefined && vfid !== 0) {
+        chrome.tabs.sendMessage(activeTabId, {
+          type: 'apply-playback',
+          action: data.action,
+          currentTime: data.currentTime,
+        }, { frameId: vfid }).catch(() => {});
+      }
+    }
   };
 
   ws.onclose = () => {

@@ -57,6 +57,7 @@ let isHost      = false; // true if we created the room (we're the sync authorit
 let pendingPlayback = null; // queued playback event waiting for videoEl
 let videoFoundPending = false;
 let videoPollInterval = null;
+let videoInIframeId = null; // (top frame only) frameId of iframe holding the video
 let shadow = null;
 
 function findVideo() {
@@ -196,32 +197,44 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
-// Sync heartbeat every 2s
+// Sync heartbeat every 2s. Runs in any frame that has the videoEl.
+// - Top frame with video: send directly to WS via wsSend
+// - Iframe with video: send via 'iframe-heartbeat' to background, it'll relay
 let heartbeatLoggedNoVideo = 0;
-let heartbeatInterval = null;
-if (IS_TOP) {
-  heartbeatInterval = setInterval(() => {
-    // if extension was reloaded, stop firing — old script is orphaned
-    if (!extContextValid()) { clearInterval(heartbeatInterval); return; }
+let heartbeatInterval = setInterval(() => {
+  if (!extContextValid()) { clearInterval(heartbeatInterval); return; }
+
+  // top frame: warn if no video found locally AND no iframe has registered one
+  if (IS_TOP && !videoEl && !videoInIframeId) {
     if (!inRoom) return;
-    if (!videoEl) {
-      heartbeatLoggedNoVideo++;
-      if (heartbeatLoggedNoVideo === 5) {
-        const count = document.querySelectorAll('video').length;
-        appendSys(`⚠️ no video attached yet (${count} <video> tags on page)`);
-        // restart polling in case it was stopped
-        pollForVideo();
-      }
-      return;
+    heartbeatLoggedNoVideo++;
+    if (heartbeatLoggedNoVideo === 5) {
+      const count = document.querySelectorAll('video').length;
+      const iframes = document.querySelectorAll('iframe').length;
+      appendSys(`⚠️ no video found (${count} <video>, ${iframes} <iframe> on page)`);
+      pollForVideo();
     }
-    heartbeatLoggedNoVideo = 0;
+    return;
+  }
+
+  // only the frame WITH videoEl broadcasts state
+  if (!videoEl) return;
+  heartbeatLoggedNoVideo = 0;
+
+  const action = videoEl.paused ? 'pause' : 'play';
+  const currentTime = videoEl.currentTime;
+
+  if (IS_TOP) {
+    if (!inRoom) return;
     wsSend({
       type: isHost ? 'playback' : 'state-ping',
-      action: videoEl.paused ? 'pause' : 'play',
-      currentTime: videoEl.currentTime,
+      action, currentTime,
     });
-  }, 2000);
-}
+  } else {
+    // iframe — background knows if we're in a room + isHost
+    safeSendMessage({ type: 'iframe-heartbeat', action, currentTime });
+  }
+}, 2000);
 
 // ── URL CHANGE DETECTION (top frame only) ─────────────────────────────────────
 if (IS_TOP) {
@@ -316,7 +329,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
 
     case 'video-in-iframe':
-      // we have an iframe with the video — currently not used in top frame, just acknowledged
+      // an iframe registered itself as the video source
+      if (msg.frameId && msg.frameId !== 0) {
+        videoInIframeId = msg.frameId;
+        appendSys(`✓ video found inside iframe — sync ready 🎬`);
+      }
       break;
 
     case 'apply-to-video-frame':
