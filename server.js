@@ -108,7 +108,8 @@ wss.on('connection', (ws) => {
       case 'jumpscare': {
         if (!roomId || !rooms[roomId]) return;
         const username = rooms[roomId].members.get(ws)?.username || 'someone';
-        broadcastAll(roomId, { type: 'jumpscare', username });
+        // scare the OTHER person, not yourself
+        broadcast(roomId, { type: 'jumpscare', username }, ws);
         break;
       }
 

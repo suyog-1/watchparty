@@ -265,19 +265,46 @@ function handleServerMsg(msg) {
 
 // ── JUMPSCARE ─────────────────────────────────────────────────────────────────
 
+// pool of scare effects — each one different
+const SCARE_EFFECTS = [
+  { color: '#ff0000', emoji: '😱', anim: 'flash' },
+  { color: '#000000', emoji: '👻', anim: 'flash' },
+  { color: '#ff6600', emoji: '🎃', anim: 'shake' },
+  { color: '#8b0000', emoji: '💀', anim: 'flash' },
+  { color: '#2c003e', emoji: '🦇', anim: 'shake' },
+  { color: '#ffffff', emoji: '😈', anim: 'flash' },
+];
+
 function doJumpscare(from) {
+  const e = SCARE_EFFECTS[Math.floor(Math.random() * SCARE_EFFECTS.length)];
   const s = document.createElement('style');
-  s.textContent = `@keyframes __dp_scare{0%{opacity:1}100%{opacity:0}}`;
+  s.textContent = `
+    @keyframes __dp_flash{0%{opacity:1}100%{opacity:0}}
+    @keyframes __dp_shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-30px)}75%{transform:translateX(30px)}}
+  `;
   document.head.appendChild(s);
   const el = document.createElement('div');
-  el.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:#ff0000;display:flex;align-items:center;justify-content:center;font-size:20vw;animation:__dp_scare .7s ease-out forwards;pointer-events:none;';
-  el.textContent = '😱';
+  const animName = e.anim === 'shake' ? '__dp_shake' : '__dp_flash';
+  el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;font-size:20vw;animation:${animName} .7s ease-out forwards;pointer-events:none;`;
+  el.textContent = e.emoji;
   document.body.appendChild(el);
   el.addEventListener('animationend', () => { el.remove(); s.remove(); });
-  appendSys(`${from} just jumpscared you 😱💀`);
 }
 
 // ── TENOR GIF SEARCH ──────────────────────────────────────────────────────────
+
+function getMovieContext() {
+  // pull what's likely the movie/video title from the page
+  // e.g. "John Wick - YouTube" → "John Wick reaction"
+  let title = document.title || '';
+  title = title.split(/[-—|·]/)[0].trim();
+  title = title.replace(/\(.*?\)/g, '').replace(/\[.*?\]/g, '').trim();
+  if (!title || title.length < 3) {
+    const fallbacks = ['movie reaction', 'popcorn', 'cinema', 'watching tv', 'movie night'];
+    return fallbacks[Math.floor(Math.random() * fallbacks.length)];
+  }
+  return title + ' reaction';
+}
 
 async function searchGifs(query) {
   const res = await fetch(`https://api.tenor.com/v1/search?q=${encodeURIComponent(query)}&key=${TENOR_KEY}&limit=12&media_filter=minimal&contentfilter=medium`);
@@ -478,12 +505,26 @@ function wireOverlay() {
     b.onclick = () => wsSend({ type: 'reaction', emoji: b.dataset.e });
   });
 
-  shadow.getElementById('scare').onclick = () => wsSend({ type: 'jumpscare' });
+  // cycle scare button text on each click
+  const SCARE_LABELS = ['😈 scare', '👻 boo', '🎃 spook', '💀 doom', '🦇 freak', '😱 jump'];
+  let scareIdx = 0;
+  shadow.getElementById('scare').onclick = () => {
+    wsSend({ type: 'jumpscare' });
+    scareIdx = (scareIdx + 1) % SCARE_LABELS.length;
+    shadow.getElementById('scare').textContent = SCARE_LABELS[scareIdx];
+  };
 
   const gifPanel = shadow.getElementById('gifpanel');
   shadow.getElementById('gbtn').onclick = () => {
     gifPanel.classList.toggle('open');
-    if (gifPanel.classList.contains('open')) shadow.getElementById('gifsearch').focus();
+    if (gifPanel.classList.contains('open')) {
+      shadow.getElementById('gifsearch').focus();
+      // load default gifs based on what they're watching
+      const grid = shadow.getElementById('gifgrid');
+      if (!grid.querySelector('.gt')) {
+        loadGifs(getMovieContext());
+      }
+    }
   };
 
   let gifTimer = null;
