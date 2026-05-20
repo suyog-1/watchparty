@@ -102,9 +102,9 @@ function wsSend(payload) {
 // ── MESSAGE LISTENER ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // popup checking if there's a video on this page
+  // popup checking if there's a video on this page (lenient — just any <video>)
   if (msg.type === 'check-video') {
-    sendResponse({ hasVideo: !!findVideo() });
+    sendResponse({ hasVideo: !!document.querySelector('video') });
     return true;
   }
 

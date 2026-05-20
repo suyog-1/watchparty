@@ -99,8 +99,8 @@ async function doJoin() {
   const tab = await getActiveTab();
   if (!tab) return showError("can't read the active tab 💀");
 
-  const hasVideo = await checkTabHasVideo(tab.id);
-  if (!hasVideo) return showError('no video on this page 💀 open a movie first');
+  // No video check on join — partner can join from any page,
+  // they'll get a clickable link when the host is on a video
 
   chrome.storage.sync.set({ username });
   setBusy(joinBtn, '🔄 joining...');
