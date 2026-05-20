@@ -143,13 +143,14 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
-// Heartbeat: broadcast current playback state every 5s so server state stays fresh.
-// New joiners get accurate currentTime, and any drift gets corrected automatically.
+// Silent heartbeat: updates server state every 5s so late joiners get accurate
+// currentTime, but does NOT broadcast to other members (would cause sync wars).
+// Only actual user actions (play/pause/seek) broadcast as 'playback'.
 if (IS_TOP) {
   setInterval(() => {
-    if (inRoom && videoEl && !isSyncing) {
+    if (inRoom && videoEl) {
       wsSend({
-        type: 'playback',
+        type: 'state-ping',
         action: videoEl.paused ? 'pause' : 'play',
         currentTime: videoEl.currentTime,
       });

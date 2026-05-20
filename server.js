@@ -84,6 +84,14 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'state-ping': {
+        // silent heartbeat: updates server state for late-joiners but does NOT
+        // broadcast to other members (avoids bidirectional sync wars)
+        if (!roomId || !rooms[roomId]) return;
+        rooms[roomId].state = { playing: msg.action === 'play', currentTime: msg.currentTime };
+        break;
+      }
+
       case 'chat': {
         if (!roomId || !rooms[roomId]) return;
         const username = rooms[roomId].members.get(ws)?.username || 'someone';
