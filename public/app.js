@@ -236,6 +236,13 @@ function addGifMsg(sender, url) {
 // ── JUMPSCARE ──
 scareBtn.addEventListener('click', () => send({ type: 'jumpscare' }));
 
+// ── CHAT TOGGLE ──
+const toggleChatBtn = document.getElementById('toggle-chat-btn');
+const chatPanel = document.querySelector('.chat-panel');
+toggleChatBtn.addEventListener('click', () => {
+  chatPanel.classList.toggle('hidden');
+});
+
 function doJumpscare(from) {
   const el = document.createElement('div');
   el.className = 'scare-overlay';

@@ -150,6 +150,7 @@ input[type="text"]::placeholder { color: var(--muted); }
   flex-shrink: 0;
 }
 .topbar-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.topbar-actions { display: flex; gap: 6px; align-items: center; }
 
 #room-code-display {
   font-weight: 700;

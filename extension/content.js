@@ -102,6 +102,12 @@ function wsSend(payload) {
 // ── MESSAGE LISTENER ─────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // popup checking if there's a video on this page
+  if (msg.type === 'check-video') {
+    sendResponse({ hasVideo: !!findVideo() });
+    return true;
+  }
+
   // playback from background (top frame) → apply to local video
   if (msg.type === 'apply-playback') {
     applyPlayback(msg.action, msg.currentTime);

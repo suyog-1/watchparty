@@ -8,6 +8,29 @@ let activeTabId   = null;     // tab where the party lives
 let videoFrames   = {};       // tabId → frameId holding <video>
 let keepalivePorts = new Set();
 
+// Restore state on service worker startup (handles SW being killed/restarted)
+chrome.storage.session.get(['roomId', 'activeTabId', 'username'], (data) => {
+  if (data.roomId)      roomId      = data.roomId;
+  if (data.activeTabId) activeTabId = data.activeTabId;
+  if (data.username)    username    = data.username;
+  // Note: WebSocket itself isn't restored — if SW died, the WS is dead too.
+  // The state restore is so the popup can show "disconnected, please rejoin"
+  // instead of pretending nothing happened.
+  if (roomId && !ws) {
+    // we have state but no WS — connection dropped, mark as disconnected
+    roomId = null;
+    persistState();
+  }
+});
+
+function persistState() {
+  chrome.storage.session.set({
+    roomId: roomId || null,
+    activeTabId: activeTabId || null,
+    username: username || null,
+  });
+}
+
 // Track open ports from content scripts to keep service worker alive
 chrome.runtime.onConnect.addListener(port => {
   keepalivePorts.add(port);
@@ -87,6 +110,7 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   if (ws) { ws.onclose = null; ws.close(); }
   username = uname;
   roomId = 'CONNECTING';
+  persistState();
 
   notifyTab({ type: 'ws-status', status: 'connecting', attempt });
 
@@ -114,6 +138,7 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
 
     if (data.type === 'created' || data.type === 'joined') {
       roomId = data.roomId;
+      persistState();
       notifyPopup({ type: 'connected', roomId: data.roomId });
     }
     if (data.type === 'members') {
@@ -127,6 +152,7 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   ws.onclose = () => {
     const wasConnected = roomId && roomId !== 'CONNECTING';
     roomId = null;
+    persistState();
     if (wasConnected) {
       notifyTab({ type: 'ws-closed' });
       notifyPopup({ type: 'ws-closed' });
@@ -154,6 +180,7 @@ function disconnectWS() {
     chrome.tabs.sendMessage(activeTabId, { type: 'ws-disconnected-by-user' }).catch(() => {});
   }
   activeTabId = null;
+  persistState();
 }
 
 function notifyTab(msg) {

@@ -1,5 +1,9 @@
 const SERVER_URL = 'https://watchparty-ayjl.onrender.com';
 
+// Pre-warm Render the moment popup opens — server starts waking up
+// while user types their name, so connection is instant when they click "create"
+fetch(SERVER_URL + '/', { method: 'GET', mode: 'no-cors' }).catch(() => {});
+
 const screenConnect   = document.getElementById('screen-connect');
 const screenOtherTab  = document.getElementById('screen-other-tab');
 const screenConnected = document.getElementById('screen-connected');
@@ -65,34 +69,44 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────
 
-createBtn.addEventListener('click', () => {
+createBtn.addEventListener('click', async () => {
   const username = usernameInput.value.trim();
   if (!username) return showError('enter your name first');
+
+  const tab = await getActiveTab();
+  if (!tab) return showError("can't read the active tab 💀");
+
+  const hasVideo = await checkTabHasVideo(tab.id);
+  if (!hasVideo) return showError('no video on this page 💀 open a movie first');
+
   chrome.storage.sync.set({ username });
   setBusy(createBtn, '🔄 connecting...');
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    chrome.runtime.sendMessage({
-      type: 'connect', action: 'create', username,
-      serverUrl: SERVER_URL, tabId: tabs[0]?.id,
-    });
+  chrome.runtime.sendMessage({
+    type: 'connect', action: 'create', username,
+    serverUrl: SERVER_URL, tabId: tab.id,
   });
 });
 
 joinBtn.addEventListener('click', doJoin);
 roomCodeInput.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
 
-function doJoin() {
+async function doJoin() {
   const username = usernameInput.value.trim();
   const roomId   = roomCodeInput.value.trim().toUpperCase();
   if (!username) return showError('enter your name first');
   if (!roomId)   return showError('enter the room code');
+
+  const tab = await getActiveTab();
+  if (!tab) return showError("can't read the active tab 💀");
+
+  const hasVideo = await checkTabHasVideo(tab.id);
+  if (!hasVideo) return showError('no video on this page 💀 open a movie first');
+
   chrome.storage.sync.set({ username });
   setBusy(joinBtn, '🔄 joining...');
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    chrome.runtime.sendMessage({
-      type: 'connect', action: 'join', username, roomId,
-      serverUrl: SERVER_URL, tabId: tabs[0]?.id,
-    });
+  chrome.runtime.sendMessage({
+    type: 'connect', action: 'join', username, roomId,
+    serverUrl: SERVER_URL, tabId: tab.id,
   });
 }
 
@@ -146,7 +160,23 @@ function resetBtns() {
 }
 
 function showError(msg) {
+  resetBtns();
   errorMsg.textContent = msg;
   errorMsg.classList.remove('hidden');
   setTimeout(() => errorMsg.classList.add('hidden'), 4000);
+}
+
+function getActiveTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => resolve(tabs[0] || null));
+  });
+}
+
+function checkTabHasVideo(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { type: 'check-video' }, (res) => {
+      if (chrome.runtime.lastError) return resolve(false);
+      resolve(res?.hasVideo === true);
+    });
+  });
 }
