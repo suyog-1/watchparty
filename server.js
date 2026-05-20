@@ -47,7 +47,7 @@ wss.on('connection', (ws) => {
 
       case 'create': {
         const id = makeId();
-        rooms[id] = { members: new Map([[ws, { username: msg.username }]]), state: { playing: false, currentTime: 0 }, video: null };
+        rooms[id] = { members: new Map([[ws, { username: msg.username }]]), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
         roomId = id;
         send(ws, { type: 'created', roomId: id });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
@@ -59,7 +59,7 @@ wss.on('connection', (ws) => {
         if (!rooms[id]) { send(ws, { type: 'error', message: 'Room not found. Check the code.' }); return; }
         rooms[id].members.set(ws, { username: msg.username });
         roomId = id;
-        send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state });
+        send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state, lastUrl: rooms[id].lastUrl });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
         broadcast(id, { type: 'peer-joined', username: msg.username }, ws);
         break;
@@ -111,6 +111,7 @@ wss.on('connection', (ws) => {
 
       case 'url-change': {
         if (!roomId || !rooms[roomId]) return;
+        rooms[roomId].lastUrl = msg.url; // remember so new joiners can be redirected
         const username = rooms[roomId].members.get(ws)?.username || 'someone';
         broadcast(roomId, { type: 'url-change', url: msg.url, username }, ws);
         break;

@@ -5,6 +5,7 @@ let ws            = null;
 let roomId        = null;
 let username      = null;
 let activeTabId   = null;     // tab where the party lives
+let lastMembers   = [];       // for restoring overlay after page navigation
 let videoFrames   = {};       // tabId → frameId holding <video>
 let keepalivePorts = new Set();
 
@@ -62,6 +63,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         roomId: roomId === 'CONNECTING' ? null : roomId,
         tabId: activeTabId,
       });
+      break;
+
+    case 'is-in-party':
+      // called by content script after page navigation to check if it should restore overlay
+      if (senderTabId === activeTabId && roomId && roomId !== 'CONNECTING') {
+        sendResponse({ inParty: true, roomId, members: lastMembers });
+      } else {
+        sendResponse({ inParty: false });
+      }
       break;
 
     // content script → background → WebSocket
@@ -142,6 +152,7 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
       notifyPopup({ type: 'connected', roomId: data.roomId });
     }
     if (data.type === 'members') {
+      lastMembers = data.members;
       notifyPopup({ type: 'members', members: data.members });
     }
 

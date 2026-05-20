@@ -91,6 +91,21 @@ if (IS_TOP) {
       if (inRoom) wsSend({ type: 'url-change', url: location.href });
     }
   }).observe(document, { subtree: true, childList: true });
+
+  // On page load: check if this tab is already in a party (e.g. after auto-nav)
+  // and restore the overlay state
+  setTimeout(() => {
+    chrome.runtime.sendMessage({ type: 'is-in-party' }, (res) => {
+      if (chrome.runtime.lastError || !res?.inParty) return;
+      inRoom = true;
+      startKeepalive();
+      showOverlay();
+      overlaySetRoom(res.roomId);
+      if (res.members) overlaySetMembers(res.members);
+      appendSys('reconnected after switching pages ↪️');
+      const v = findVideo(); if (v) attachVideo(v); else pollForVideo();
+    });
+  }, 100);
 }
 
 // ── WS HELPER (sends through background) ─────────────────────────────────────
@@ -165,8 +180,14 @@ function handleServerMsg(msg) {
     case 'joined':
       inRoom = true;
       overlaySetRoom(msg.roomId);
-      appendSys("you're in! 🎉 open a movie and press play");
-      // broadcast our current URL so partner can navigate here
+      appendSys("you're in! 🎉");
+      // if we joined a room that already has a URL, auto-navigate there
+      if (msg.type === 'joined' && msg.lastUrl && msg.lastUrl !== location.href) {
+        appendSys(`taking you to where they're watching… 🎬`);
+        setTimeout(() => { location.href = msg.lastUrl; }, 800);
+        break;
+      }
+      // broadcast our current URL so partner can follow
       wsSend({ type: 'url-change', url: location.href });
       const v = findVideo(); if (v) attachVideo(v); else pollForVideo();
       break;
@@ -186,7 +207,13 @@ function handleServerMsg(msg) {
     case 'gif':        appendGif(msg.username, msg.url);  break;
     case 'reaction':   popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
     case 'jumpscare':  doJumpscare(msg.username); break;
-    case 'url-change': appendUrlNotif(msg.username, msg.url); break;
+    case 'url-change':
+      // auto-navigate to follow partner — content script will re-init on new page
+      if (msg.url !== location.href) {
+        appendSys(`${msg.username} switched videos — following… 🎬`);
+        setTimeout(() => { location.href = msg.url; }, 800);
+      }
+      break;
   }
 }
 
