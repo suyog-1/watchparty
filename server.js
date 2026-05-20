@@ -43,6 +43,9 @@ wss.on('connection', (ws) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
+    // heartbeat ping — silently absorb
+    if (msg.type === 'ping') return;
+
     switch (msg.type) {
 
       case 'create': {

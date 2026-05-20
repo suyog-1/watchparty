@@ -227,8 +227,11 @@ function handleServerMsg(msg) {
     case 'url-change':
       // auto-navigate to follow partner — content script will re-init on new page
       if (msg.url !== location.href) {
-        appendSys(`${msg.username} switched videos — following… 🎬`);
+        appendSys(`${msg.username} is at: ${msg.url.slice(0, 50)}…`);
+        appendSys(`taking you there… 🎬`);
         setTimeout(() => { location.href = msg.url; }, 800);
+      } else {
+        appendSys(`✓ same page as ${msg.username} — ready to watch`);
       }
       break;
   }

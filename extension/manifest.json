@@ -3,7 +3,7 @@
   "name": "daddy's party 🎬",
   "version": "1.0.0",
   "description": "watch movies w ur person, in sync, on literally any site 🎬",
-  "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation"],
+  "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation", "alarms"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

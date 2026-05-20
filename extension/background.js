@@ -38,6 +38,18 @@ chrome.runtime.onConnect.addListener(port => {
   port.onDisconnect.addListener(() => keepalivePorts.delete(port));
 });
 
+// HEARTBEAT: alarm fires every 25 seconds (just under Chrome's 30s idle kill)
+// to prevent service worker termination while WebSocket is alive
+chrome.alarms.create('dp-heartbeat', { periodInMinutes: 0.42 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'dp-heartbeat') {
+    // also send a ping over WS to keep proxy connections warm
+    if (ws?.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'ping' })); } catch (_) {}
+    }
+  }
+});
+
 // ── MESSAGE ROUTING ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
