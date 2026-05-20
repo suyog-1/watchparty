@@ -1,4 +1,3 @@
-// server url is hardcoded — neither person needs to type anything
 const SERVER_URL = 'https://watchparty-ayjl.onrender.com';
 
 const screenConnect   = document.getElementById('screen-connect');
@@ -18,40 +17,39 @@ const displayCode    = document.getElementById('display-code');
 const displayMembers = document.getElementById('display-members');
 const leaveBtn       = document.getElementById('leave-btn');
 
-let connectTimeout = null;
-let otherTabId     = null;
+let otherTabId = null;
 
-// ── INIT: check if already in a party anywhere ────────────────────────────────
+// ── INIT ──────────────────────────────────────────────────────────────────────
 
 chrome.storage.sync.get(['username'], d => {
   if (d.username) usernameInput.value = d.username;
 });
 
-chrome.runtime.sendMessage({ type: 'get-connection' }, (res) => {
-  const conn = res?.conn;
-  if (!conn) return;
+chrome.runtime.sendMessage({ type: 'get-state' }, (state) => {
+  if (!state) return;
 
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const thisTabId = tabs[0]?.id;
 
-    if (conn.roomId === 'CONNECTING') {
-      // still connecting — show a waiting state, don't let them start another
-      if (conn.tabId === thisTabId) {
+    if (state.connecting) {
+      if (state.tabId === thisTabId) {
         createBtn.textContent = '🔄 connecting...';
         createBtn.disabled = true;
         joinBtn.disabled = true;
       } else {
-        otherTabId = conn.tabId;
+        otherTabId = state.tabId;
         show(screenOtherTab);
       }
       return;
     }
 
-    if (conn.tabId === thisTabId) {
-      showConnected(conn.roomId);
-    } else {
-      otherTabId = conn.tabId;
-      show(screenOtherTab);
+    if (state.connected) {
+      if (state.tabId === thisTabId) {
+        showConnected(state.roomId);
+      } else {
+        otherTabId = state.tabId;
+        show(screenOtherTab);
+      }
     }
   });
 });
@@ -59,24 +57,26 @@ chrome.runtime.sendMessage({ type: 'get-connection' }, (res) => {
 // ── LISTENERS ─────────────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'connected')  { clearTimeout(connectTimeout); showConnected(msg.roomId); }
+  if (msg.type === 'connected')  showConnected(msg.roomId);
   if (msg.type === 'ws-closed')  { resetBtns(); show(screenConnect); }
-  if (msg.type === 'error')      { resetBtns(); showError(msg.message); }
-  if (msg.type === 'members')    { displayMembers.textContent = msg.members.join(' & '); }
+  if (msg.type === 'ws-error')   { resetBtns(); showError(msg.message); }
+  if (msg.type === 'members')    displayMembers.textContent = msg.members.join(' & ');
 });
 
-// ── CREATE ────────────────────────────────────────────────────────────────────
+// ── ACTIONS ───────────────────────────────────────────────────────────────────
 
 createBtn.addEventListener('click', () => {
   const username = usernameInput.value.trim();
   if (!username) return showError('enter your name first');
   chrome.storage.sync.set({ username });
   setBusy(createBtn, '🔄 connecting...');
-  sendToContent({ type: 'connect', action: 'create', username, serverUrl: SERVER_URL });
-  armTimeout();
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    chrome.runtime.sendMessage({
+      type: 'connect', action: 'create', username,
+      serverUrl: SERVER_URL, tabId: tabs[0]?.id,
+    });
+  });
 });
-
-// ── JOIN ──────────────────────────────────────────────────────────────────────
 
 joinBtn.addEventListener('click', doJoin);
 roomCodeInput.addEventListener('keydown', e => { if (e.key === 'Enter') doJoin(); });
@@ -88,11 +88,13 @@ function doJoin() {
   if (!roomId)   return showError('enter the room code');
   chrome.storage.sync.set({ username });
   setBusy(joinBtn, '🔄 joining...');
-  sendToContent({ type: 'connect', action: 'join', username, serverUrl: SERVER_URL, roomId });
-  armTimeout();
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    chrome.runtime.sendMessage({
+      type: 'connect', action: 'join', username, roomId,
+      serverUrl: SERVER_URL, tabId: tabs[0]?.id,
+    });
+  });
 }
-
-// ── OTHER TAB SCREEN ──────────────────────────────────────────────────────────
 
 gotoTabBtn.addEventListener('click', () => {
   if (otherTabId) chrome.runtime.sendMessage({ type: 'focus-tab', tabId: otherTabId });
@@ -100,22 +102,16 @@ gotoTabBtn.addEventListener('click', () => {
 });
 
 leaveOtherBtn.addEventListener('click', () => {
-  if (otherTabId) {
-    chrome.tabs.sendMessage(otherTabId, { type: 'disconnect' }).catch(() => {});
-  }
+  chrome.runtime.sendMessage({ type: 'disconnect' });
   otherTabId = null;
   show(screenConnect);
 });
 
-// ── LEAVE ─────────────────────────────────────────────────────────────────────
-
 leaveBtn.addEventListener('click', () => {
-  sendToContent({ type: 'disconnect' });
+  chrome.runtime.sendMessage({ type: 'disconnect' });
   resetBtns();
   show(screenConnect);
 });
-
-// ── COPY CODE ─────────────────────────────────────────────────────────────────
 
 displayCode.addEventListener('click', () => {
   navigator.clipboard.writeText(displayCode.textContent).then(() => {
@@ -133,7 +129,6 @@ function show(el) {
 }
 
 function showConnected(roomId) {
-  clearTimeout(connectTimeout);
   displayCode.textContent = roomId;
   show(screenConnected);
 }
@@ -150,26 +145,8 @@ function resetBtns() {
   joinBtn.disabled = false;
 }
 
-function armTimeout() {
-  clearTimeout(connectTimeout);
-  connectTimeout = setTimeout(() => {
-    resetBtns();
-    showError("server's waking up 😴 try again in 15s");
-  }, 15000);
-}
-
 function showError(msg) {
   errorMsg.textContent = msg;
   errorMsg.classList.remove('hidden');
   setTimeout(() => errorMsg.classList.add('hidden'), 4000);
-}
-
-function sendToContent(msg, cb) {
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs[0]?.id) { cb?.(null); return; }
-    chrome.tabs.sendMessage(tabs[0].id, msg, (res) => {
-      if (chrome.runtime.lastError) { cb?.(null); return; }
-      cb?.(res);
-    });
-  });
 }

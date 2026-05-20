@@ -1,9 +1,17 @@
 // daddy's party 🎬 — content script
-// ALL FRAMES: video detection + playback control
-// MAIN FRAME only: WebSocket + overlay UI
+// Detects video, manages overlay UI, forwards everything via background service worker
+// (background owns the WebSocket so YouTube's CSP can't block it)
 
 const IS_TOP = window === window.top;
 const TENOR_KEY = 'LIVDSRZULELA';
+
+// Keep service worker alive while overlay is open
+let keepalivePort = null;
+function startKeepalive() {
+  if (keepalivePort) return;
+  keepalivePort = chrome.runtime.connect({ name: 'dp-keepalive' });
+  keepalivePort.onDisconnect.addListener(() => { keepalivePort = null; });
+}
 
 // ── FUNNY MESSAGES ────────────────────────────────────────────────────────────
 
@@ -14,14 +22,14 @@ const LEAVE_MSGS = ['ghosted 💀', 'said peace ✌️', 'left the building 🚪
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-// ── VIDEO DETECTION (all frames) ─────────────────────────────────────────────
+// ── VIDEO DETECTION ─────────────────────────────────────────────
 
-let videoEl      = null;
-let isSyncing    = false;
-let videoMutObs  = null;
+let videoEl     = null;
+let isSyncing   = false;
+let videoMutObs = null;
+let inRoom      = false;
 
 function findVideo() {
-  // readyState check removed — YouTube starts at 0
   return [...document.querySelectorAll('video')]
     .filter(v => v.offsetWidth > 0 && v.offsetHeight > 0)
     .sort((a, b) => b.videoWidth * b.videoHeight - a.videoWidth * a.videoHeight)[0] || null;
@@ -45,9 +53,9 @@ function detachVideo() {
   videoEl = null;
 }
 
-function onPlay()   { if (!isSyncing) emitVideoEvent('play',  videoEl.currentTime); }
-function onPause()  { if (!isSyncing) emitVideoEvent('pause', videoEl.currentTime); }
-function onSeeked() { if (!isSyncing) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
+function onPlay()   { if (!isSyncing && inRoom) emitVideoEvent('play',  videoEl.currentTime); }
+function onPause()  { if (!isSyncing && inRoom) emitVideoEvent('pause', videoEl.currentTime); }
+function onSeeked() { if (!isSyncing && inRoom) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
 
 function emitVideoEvent(action, currentTime) {
   if (IS_TOP) wsSend({ type: 'playback', action, currentTime });
@@ -74,128 +82,98 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
-// ── URL CHANGE DETECTION (main frame only) ────────────────────────────────────
+// ── URL CHANGE DETECTION (top frame only) ─────────────────────────────────────
 if (IS_TOP) {
   let lastUrl = location.href;
   new MutationObserver(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
-      if (roomId) wsSend({ type: 'url-change', url: location.href });
+      if (inRoom) wsSend({ type: 'url-change', url: location.href });
     }
   }).observe(document, { subtree: true, childList: true });
 }
 
-// ── MESSAGE LISTENER (all frames) ────────────────────────────────────────────
+// ── WS HELPER (sends through background) ─────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+function wsSend(payload) {
+  chrome.runtime.sendMessage({ type: 'ws-send', payload }).catch(() => {});
+}
+
+// ── MESSAGE LISTENER ─────────────────────────────────────────────────────────
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // playback from background (top frame) → apply to local video
   if (msg.type === 'apply-playback') {
     applyPlayback(msg.action, msg.currentTime);
     sendResponse({ ok: true });
     return true;
   }
-  if (IS_TOP) handleTopMsg(msg, sendResponse);
+
+  // these only matter in the top frame (overlay lives there)
+  if (!IS_TOP) return true;
+
+  switch (msg.type) {
+    case 'ws-status':
+      startKeepalive();
+      showOverlay();
+      if (msg.status === 'connecting') appendSys(msg.attempt > 1 ? `retrying… (${msg.attempt}/3) 🔄` : 'connecting… give it a sec 🔄');
+      if (msg.status === 'retrying')   appendSys(`render is asleep, retrying… (${msg.attempt}/3) 💤`);
+      break;
+
+    case 'ws-msg':
+      handleServerMsg(msg.data);
+      break;
+
+    case 'ws-error':
+      appendSys(msg.message + ' 💀');
+      break;
+
+    case 'ws-closed':
+      inRoom = false;
+      appendSys('disconnected 😭 open the extension to rejoin');
+      break;
+
+    case 'ws-disconnected-by-user':
+      inRoom = false;
+      hideOverlay();
+      removePill();
+      break;
+
+    case 'video-in-iframe':
+      // we have an iframe with the video — currently not used in top frame, just acknowledged
+      break;
+
+    case 'apply-to-video-frame':
+      // route through background
+      chrome.runtime.sendMessage(msg).catch(() => {});
+      break;
+  }
   return true;
 });
 
-// ── MAIN FRAME: WEBSOCKET ─────────────────────────────────────────────────────
-
-let ws              = null;
-let roomId          = null;
-let videoInIframeId = null;
-
-function handleTopMsg(msg, sendResponse) {
-  switch (msg.type) {
-    case 'connect':
-      connectWS(msg.serverUrl, msg.action, msg.roomId, msg.username);
-      sendResponse({ ok: true }); break;
-    case 'disconnect':
-      if (ws) { ws.onclose = null; ws.close(); ws = null; }
-      roomId = null; hideOverlay();
-      sendResponse({ ok: true }); break;
-    case 'status':
-      sendResponse({ connected: ws?.readyState === WebSocket.OPEN, roomId }); break;
-    case 'video-in-iframe':
-      videoInIframeId = msg.frameId; break;
-    case 'local-video-event':
-      wsSend({ type: 'playback', action: msg.action, currentTime: msg.currentTime }); break;
-  }
-}
-
-function connectWS(serverUrl, action, rid, uname, attempt = 1) {
-  if (ws) { ws.onclose = null; ws.close(); }
-
-  // tell background we're connecting so popup doesn't think it reset
-  chrome.runtime.sendMessage({ type: 'set-connection', roomId: 'CONNECTING' }).catch(() => {});
-
-  showOverlay();
-  appendSys(attempt === 1 ? 'connecting… give it a sec 🔄' : `retrying… (${attempt}/3) 🔄`);
-
-  const wsUrl = serverUrl.replace(/^https/, 'wss').replace(/^http/, 'ws');
-  ws = new WebSocket(wsUrl);
-
-  ws.onopen = () => wsSend(
-    action === 'create'
-      ? { type: 'create', username: uname }
-      : { type: 'join',   username: uname, roomId: rid }
-  );
-
-  ws.onmessage = (e) => { try { handleServerMsg(JSON.parse(e.data)); } catch (_) {} };
-
-  ws.onclose = () => {
-    if (roomId) {
-      // was connected, now dropped
-      roomId = null;
-      chrome.runtime.sendMessage({ type: 'set-connection', roomId: null }).catch(() => {});
-      appendSys('disconnected 😭 open the extension to rejoin');
-      chrome.runtime.sendMessage({ type: 'ws-closed' }).catch(() => {});
-    }
-  };
-
-  ws.onerror = () => {
-    if (attempt < 3) {
-      // auto-retry — Render free tier takes ~30s to wake up
-      setTimeout(() => connectWS(serverUrl, action, rid, uname, attempt + 1), 10000);
-    } else {
-      appendSys('still can't connect 💀 render might be down, try again later');
-      chrome.runtime.sendMessage({ type: 'error', message: 'could not connect after 3 tries 💀' }).catch(() => {});
-    }
-  };
-}
-
-function wsSend(obj) {
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
-}
+// ── SERVER MESSAGE HANDLER ───────────────────────────────────────────────────
 
 function handleServerMsg(msg) {
   switch (msg.type) {
     case 'created':
     case 'joined':
-      roomId = msg.roomId;
+      inRoom = true;
       overlaySetRoom(msg.roomId);
-      // register with background so popup knows we're connected
-      chrome.runtime.sendMessage({ type: 'set-connection', roomId: msg.roomId }).catch(() => {});
-      chrome.runtime.sendMessage({ type: 'connected', roomId: msg.roomId }).catch(() => {});
       appendSys("you're in! 🎉 open a movie and press play");
-      // broadcast current URL so partner can navigate here
+      // broadcast our current URL so partner can navigate here
       wsSend({ type: 'url-change', url: location.href });
       const v = findVideo(); if (v) attachVideo(v); else pollForVideo();
       break;
     case 'error':
       appendSys(msg.message + ' 💀');
-      chrome.runtime.sendMessage({ type: 'error', message: msg.message }).catch(() => {});
       break;
     case 'members':
       overlaySetMembers(msg.members);
-      chrome.runtime.sendMessage({ type: 'members', members: msg.members }).catch(() => {});
       break;
     case 'peer-joined': appendSys(`${msg.username} ${pick(JOIN_MSGS)}`); break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
     case 'playback':
-      if (videoInIframeId) {
-        chrome.runtime.sendMessage({ type: 'apply-to-video-frame', action: msg.action, currentTime: msg.currentTime }).catch(() => {});
-      } else {
-        applyPlayback(msg.action, msg.currentTime);
-      }
+      applyPlayback(msg.action, msg.currentTime);
       appendSys(`${msg.from} ${msg.action === 'play' ? pick(PLAY_MSGS) : pick(PAUSE_MSGS)}`);
       break;
     case 'chat':       appendChat(msg.username, msg.text); break;
@@ -210,10 +188,10 @@ function handleServerMsg(msg) {
 
 function doJumpscare(from) {
   const s = document.createElement('style');
-  s.textContent = `@keyframes __wp_scare{0%{opacity:1}100%{opacity:0}}`;
+  s.textContent = `@keyframes __dp_scare{0%{opacity:1}100%{opacity:0}}`;
   document.head.appendChild(s);
   const el = document.createElement('div');
-  el.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:#ff0000;display:flex;align-items:center;justify-content:center;font-size:20vw;animation:__wp_scare .7s ease-out forwards;pointer-events:none;';
+  el.style.cssText = 'position:fixed;inset:0;z-index:2147483646;background:#ff0000;display:flex;align-items:center;justify-content:center;font-size:20vw;animation:__dp_scare .7s ease-out forwards;pointer-events:none;';
   el.textContent = '😱';
   document.body.appendChild(el);
   el.addEventListener('animationend', () => { el.remove(); s.remove(); });
@@ -251,7 +229,6 @@ const OVERLAY_CSS = `
     flex-direction:column;
   }
 
-  /* topbar */
   #bar{
     display:flex;align-items:center;gap:8px;
     padding:11px 14px;
@@ -281,16 +258,9 @@ const OVERLAY_CSS = `
   }
   .ib:hover{color:#f0f0f5}
 
-  /* collapsible body */
-  #body{
-    display:flex;flex-direction:column;
-    overflow:hidden;
-    max-height:400px;
-    transition:max-height .25s cubic-bezier(.4,0,.2,1);
-  }
+  #body{display:flex;flex-direction:column;overflow:hidden;max-height:400px;transition:max-height .25s cubic-bezier(.4,0,.2,1)}
   #body.mini{max-height:0}
 
-  /* chat log */
   #log{
     flex:1;height:170px;overflow-y:auto;
     padding:10px 12px;display:flex;flex-direction:column;gap:7px;
@@ -304,11 +274,7 @@ const OVERLAY_CSS = `
   .m.s  .txt{color:#7755aa;font-style:italic}
   .m .gimg{max-width:100%;border-radius:8px;margin-top:3px}
 
-  /* reactions */
-  #rxns{
-    display:flex;align-items:center;gap:4px;
-    padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0;
-  }
+  #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0}
   .rb{
     background:none;border:1px solid #ffffff15;border-radius:7px;
     font-size:1rem;padding:3px 7px;cursor:pointer;
@@ -324,7 +290,6 @@ const OVERLAY_CSS = `
   }
   #scare:hover{transform:scale(1.06)}
 
-  /* gif panel */
   #gifpanel{display:none;flex-direction:column;gap:7px;padding:9px 12px;border-top:1px solid #ffffff08}
   #gifpanel.open{display:flex}
   #gifsearch{
@@ -338,11 +303,7 @@ const OVERLAY_CSS = `
   .gt:hover{opacity:.8}
   #gifhint{font-size:.75rem;color:#664488;text-align:center;padding:8px}
 
-  /* chat input */
-  #cin-row{
-    display:flex;gap:6px;padding:8px 10px;
-    border-top:1px solid #ffffff08;align-items:center;flex-shrink:0;
-  }
+  #cin-row{display:flex;gap:6px;padding:8px 10px;border-top:1px solid #ffffff08;align-items:center;flex-shrink:0}
   #cin{
     flex:1;background:#1e0035;border:1px solid #ffffff12;border-radius:9px;
     color:#f0f0f5;font-size:.82rem;padding:8px 11px;outline:none;min-width:0;
@@ -362,7 +323,6 @@ const OVERLAY_CSS = `
   }
   #sbtn:hover{transform:scale(1.05)}
 
-  /* floaty reactions */
   #rxnlayer{position:fixed;bottom:90px;right:24px;pointer-events:none;z-index:2147483647}
   .rb2{position:absolute;font-size:2rem;bottom:0;animation:fup 2.4s ease-out forwards}
   @keyframes fup{0%{opacity:1;transform:translateY(0) scale(.7)}100%{opacity:0;transform:translateY(-170px) scale(1.3)}}
@@ -386,7 +346,7 @@ function buildOverlay() {
         </div>
         <span id="code-chip">—</span>
         <button class="ib" id="minbtn">▾</button>
-        <button class="ib" id="xbtn">✕</button>
+        <button class="ib" id="xbtn" title="hide (stays connected)">✕</button>
       </div>
       <div id="body">
         <div id="log"></div>
@@ -416,35 +376,31 @@ function buildOverlay() {
 }
 
 function wireOverlay() {
-  // minimize — uses CSS max-height transition, no layout glitch
   const body = shadow.getElementById('body');
   shadow.getElementById('minbtn').onclick = () => {
     const mini = body.classList.toggle('mini');
     shadow.getElementById('minbtn').textContent = mini ? '▴' : '▾';
   };
 
-  // X = hide overlay only, stay connected
+  // X = hide overlay only, stay connected; pill brings it back
   shadow.getElementById('xbtn').onclick = () => hideOverlay();
 
-  // copy code
   shadow.getElementById('code-chip').onclick = () => {
-    if (!roomId) return;
-    navigator.clipboard.writeText(roomId).then(() => {
+    const code = shadow.getElementById('code-chip').textContent;
+    if (code === '—') return;
+    navigator.clipboard.writeText(code).then(() => {
       const el = shadow.getElementById('code-chip');
       el.textContent = 'copied 📋';
-      setTimeout(() => { el.textContent = roomId; }, 1400);
+      setTimeout(() => { el.textContent = code; }, 1400);
     });
   };
 
-  // emoji reactions
   shadow.querySelectorAll('.rb').forEach(b => {
     b.onclick = () => wsSend({ type: 'reaction', emoji: b.dataset.e });
   });
 
-  // jumpscare
   shadow.getElementById('scare').onclick = () => wsSend({ type: 'jumpscare' });
 
-  // gif panel
   const gifPanel = shadow.getElementById('gifpanel');
   shadow.getElementById('gbtn').onclick = () => {
     gifPanel.classList.toggle('open');
@@ -459,7 +415,6 @@ function wireOverlay() {
   });
   stopProp(shadow.getElementById('gifsearch'));
 
-  // chat
   const cin = shadow.getElementById('cin');
   shadow.getElementById('sbtn').onclick = doChat;
   cin.addEventListener('keydown', e => { if (e.key === 'Enter') doChat(); e.stopPropagation(); });
@@ -512,7 +467,7 @@ function showOverlay() {
 
 function hideOverlay() {
   if (shadow) shadow.host.style.display = 'none';
-  if (roomId) showPill(); // only show pill if still connected
+  if (inRoom) showPill();
 }
 
 function showPill() {
@@ -520,12 +475,12 @@ function showPill() {
   const pill = document.createElement('div');
   pill.id = '__dp_pill__';
   pill.style.cssText = [
-    'position:fixed', 'bottom:20px', 'right:20px', 'z-index:2147483647',
+    'position:fixed','bottom:20px','right:20px','z-index:2147483647',
     'background:linear-gradient(135deg,#ff2d78,#a855f7)',
-    'color:#fff', 'border-radius:20px', 'padding:8px 14px',
-    'font-family:system-ui,sans-serif', 'font-size:.78rem', 'font-weight:700',
-    'cursor:pointer', 'box-shadow:0 4px 16px #ff2d7850',
-    'display:flex', 'align-items:center', 'gap:6px', 'user-select:none',
+    'color:#fff','border-radius:20px','padding:8px 14px',
+    'font-family:system-ui,sans-serif','font-size:.78rem','font-weight:700',
+    'cursor:pointer','box-shadow:0 4px 16px #ff2d7850',
+    'user-select:none',
   ].join(';');
   pill.textContent = "🎬 daddy's party";
   pill.onclick = () => { showOverlay(); };
@@ -549,8 +504,23 @@ function overlaySetMembers(m) {
 function appendChat(who, text) { if (shadow) append(false, who, text); }
 function appendSys(text)       { if (shadow) append(true,  '•',  text); }
 
+function appendGif(who, url) {
+  if (!shadow) return;
+  if (shadow.host.style.display === 'none') showOverlay();
+  const log = shadow.getElementById('log');
+  const el  = document.createElement('div');
+  el.className = 'm';
+  el.innerHTML = `<span class="who">${esc(who)}</span>`;
+  const img = document.createElement('img');
+  img.className = 'gimg'; img.src = url; img.alt = 'gif';
+  el.appendChild(img);
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
 function appendUrlNotif(who, url) {
   if (!shadow) return;
+  if (shadow.host.style.display === 'none') showOverlay();
   const log = shadow.getElementById('log');
   const el  = document.createElement('div');
   el.className = 'm s';
@@ -572,21 +542,7 @@ function appendUrlNotif(who, url) {
   log.scrollTop = log.scrollHeight;
 }
 
-function appendGif(who, url) {
-  if (!shadow) return;
-  const log = shadow.getElementById('log');
-  const el  = document.createElement('div');
-  el.className = 'm';
-  el.innerHTML = `<span class="who">${esc(who)}</span>`;
-  const img = document.createElement('img');
-  img.className = 'gimg'; img.src = url; img.alt = 'gif';
-  el.appendChild(img);
-  log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
-}
-
 function append(sys, who, text) {
-  // if overlay hidden and this is an incoming message, pop it back up
   if (shadow?.host.style.display === 'none') showOverlay();
   const log = shadow.getElementById('log');
   const el  = document.createElement('div');
