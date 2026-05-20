@@ -6,6 +6,7 @@ let roomId        = null;
 let username      = null;
 let activeTabId   = null;     // tab where the party lives
 let lastMembers   = [];       // for restoring overlay after page navigation
+let lastState     = null;     // last known playback state {action, currentTime} for restoration
 let videoFrames   = {};       // tabId → frameId holding <video>
 let keepalivePorts = new Set();
 
@@ -80,7 +81,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'is-in-party':
       // called by content script after page navigation to check if it should restore overlay
       if (senderTabId === activeTabId && roomId && roomId !== 'CONNECTING') {
-        sendResponse({ inParty: true, roomId, members: lastMembers });
+        sendResponse({ inParty: true, roomId, members: lastMembers, state: lastState });
       } else {
         sendResponse({ inParty: false });
       }
@@ -166,6 +167,9 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
     if (data.type === 'members') {
       lastMembers = data.members;
       notifyPopup({ type: 'members', members: data.members });
+    }
+    if (data.type === 'playback') {
+      lastState = { action: data.action, currentTime: data.currentTime };
     }
 
     // forward all server messages to the active tab's content script

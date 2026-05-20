@@ -112,6 +112,20 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
+// Heartbeat: broadcast current playback state every 5s so server state stays fresh.
+// New joiners get accurate currentTime, and any drift gets corrected automatically.
+if (IS_TOP) {
+  setInterval(() => {
+    if (inRoom && videoEl && !isSyncing) {
+      wsSend({
+        type: 'playback',
+        action: videoEl.paused ? 'pause' : 'play',
+        currentTime: videoEl.currentTime,
+      });
+    }
+  }, 5000);
+}
+
 // ── URL CHANGE DETECTION (top frame only) ─────────────────────────────────────
 if (IS_TOP) {
   let lastUrl = location.href;
@@ -132,8 +146,12 @@ if (IS_TOP) {
       showOverlay();
       overlaySetRoom(res.roomId);
       if (res.members) overlaySetMembers(res.members);
-      appendSys('reconnected after switching pages ↪️');
-      const v = findVideo(); if (v) attachVideo(v); else pollForVideo();
+      // queue the most recent playback state so video syncs to host's position when it loads
+      if (res.state) {
+        pendingPlayback = { action: res.state.action, currentTime: res.state.currentTime };
+      }
+      appendSys('reconnected — catching up to where they are 🎬');
+      attachVideoOrPoll();
     });
   }, 100);
 }
@@ -253,14 +271,35 @@ function handleServerMsg(msg) {
       break;
     case 'peer-joined':
       appendSys(`${msg.username} ${pick(JOIN_MSGS)}`);
-      // re-broadcast our URL so the new person gets pulled into our page
-      if (inRoom) setTimeout(() => wsSend({ type: 'url-change', url: location.href }), 200);
+      // re-broadcast our URL AND current playback state so the joiner syncs to us
+      if (inRoom) {
+        setTimeout(() => {
+          wsSend({ type: 'url-change', url: location.href });
+          if (videoEl) {
+            wsSend({
+              type: 'playback',
+              action: videoEl.paused ? 'pause' : 'play',
+              currentTime: videoEl.currentTime,
+            });
+          }
+        }, 500);
+      }
       break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
-    case 'playback':
+    case 'playback': {
+      // detect if this is a real change vs a heartbeat (no actual state change)
+      const wasPlaying = videoEl ? !videoEl.paused : false;
+      const wasTime = videoEl ? videoEl.currentTime : 0;
+      const isStateChange = videoEl && (
+        wasPlaying !== (msg.action === 'play') ||
+        Math.abs(wasTime - msg.currentTime) > 2
+      );
       applyPlayback(msg.action, msg.currentTime);
-      appendSys(`${msg.from} ${msg.action === 'play' ? pick(PLAY_MSGS) : pick(PAUSE_MSGS)}`);
+      if (isStateChange || !videoEl) {
+        appendSys(`${msg.from} ${msg.action === 'play' ? pick(PLAY_MSGS) : pick(PAUSE_MSGS)}`);
+      }
       break;
+    }
     case 'chat':       appendChat(msg.username, msg.text); break;
     case 'gif':        appendGif(msg.username, msg.url);  break;
     case 'reaction':   popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
