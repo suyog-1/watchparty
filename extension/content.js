@@ -34,6 +34,7 @@ let videoEl     = null;
 let isSyncing   = false;
 let videoMutObs = null;
 let inRoom      = false;
+let isHost      = false; // true if we created the room (we're the sync authority)
 let pendingPlayback = null; // queued playback event waiting for videoEl
 
 function findVideo() {
@@ -60,10 +61,9 @@ function attachVideo(video) {
   chrome.runtime.sendMessage({ type: 'register-video-frame' }).catch(() => {});
   if (IS_TOP) {
     if (shadow) appendSys('video found — sync ready 🎬');
-    else videoFoundPending = true; // log later when overlay is built
-    // if we're already in a room when video attaches, broadcast initial state
-    // (covers case where video loaded AFTER content script + after peer-joined)
-    if (inRoom) {
+    else videoFoundPending = true;
+    // when host's video attaches, broadcast state immediately so joiner can sync
+    if (inRoom && isHost) {
       setTimeout(() => {
         if (videoEl) wsSend({
           type: 'playback',
@@ -143,19 +143,19 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
-// Silent heartbeat: updates server state every 5s so late joiners get accurate
-// currentTime, but does NOT broadcast to other members (would cause sync wars).
-// Only actual user actions (play/pause/seek) broadcast as 'playback'.
+// Sync heartbeat every 2s:
+// - Host (room creator) broadcasts 'playback' → joiners auto-correct drift to host
+// - Joiner sends 'state-ping' → server updates state silently (for future late joiners)
+// This way only one side is "authority" so no sync wars, and drift is auto-corrected.
 if (IS_TOP) {
   setInterval(() => {
-    if (inRoom && videoEl) {
-      wsSend({
-        type: 'state-ping',
-        action: videoEl.paused ? 'pause' : 'play',
-        currentTime: videoEl.currentTime,
-      });
-    }
-  }, 5000);
+    if (!inRoom || !videoEl) return;
+    wsSend({
+      type: isHost ? 'playback' : 'state-ping',
+      action: videoEl.paused ? 'pause' : 'play',
+      currentTime: videoEl.currentTime,
+    });
+  }, 2000);
 }
 
 // ── URL CHANGE DETECTION (top frame only) ─────────────────────────────────────
@@ -174,15 +174,15 @@ if (IS_TOP) {
     chrome.runtime.sendMessage({ type: 'is-in-party' }, (res) => {
       if (chrome.runtime.lastError || !res?.inParty) return;
       inRoom = true;
+      isHost = res.isHost === true; // restore role from background
       startKeepalive();
       showOverlay();
       overlaySetRoom(res.roomId);
       if (res.members) overlaySetMembers(res.members);
-      // queue the most recent playback state so video syncs to host's position when it loads
       if (res.state) {
         pendingPlayback = { action: res.state.action, currentTime: res.state.currentTime };
       }
-      appendSys('reconnected — catching up to where they are 🎬');
+      appendSys('reconnected — catching up 🎬');
       attachVideoOrPoll();
     });
   }, 100);
@@ -272,18 +272,19 @@ function handleServerMsg(msg) {
   switch (msg.type) {
     case 'created':
       inRoom = true;
+      isHost = true; // we created the room — we're the sync authority
       overlaySetRoom(msg.roomId);
       appendSys("you're in! 🎉 share the code w bae");
-      // host broadcasts current URL so future joiners get it
       wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
       break;
 
     case 'joined':
       inRoom = true;
+      isHost = false; // we joined someone else's room — they're the authority
       overlaySetRoom(msg.roomId);
       // queue the room's current playback state so we sync to where host is
-      if (msg.state && (msg.state.playing || msg.state.currentTime > 0)) {
+      if (msg.state) {
         pendingPlayback = { action: msg.state.playing ? 'play' : 'pause', currentTime: msg.state.currentTime };
       }
       // if room already has a URL, auto-navigate there
