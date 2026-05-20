@@ -53,6 +53,13 @@ const timeTotal    = document.getElementById('time-total');
 const chatMessages = document.getElementById('chat-messages');
 const chatInput    = document.getElementById('chat-input');
 const chatSendBtn  = document.getElementById('chat-send-btn');
+const gifBtn       = document.getElementById('gif-btn');
+const gifPanel     = document.getElementById('gif-panel');
+const gifSearch    = document.getElementById('gif-search');
+const gifGrid      = document.getElementById('gif-grid');
+const scareBtn     = document.getElementById('scare-btn');
+
+const TENOR_KEY = 'LIVDSRZULELA';
 
 // ── YOUTUBE API ──
 window.onYouTubeIframeAPIReady = () => { ytReady = true; };
@@ -168,7 +175,74 @@ function handleMessage(msg) {
       spawnReaction(msg.emoji);
       addSys(`${msg.username} ${msg.emoji}`);
       break;
+    case 'gif':
+      addGifMsg(msg.username, msg.url);
+      break;
+    case 'jumpscare':
+      doJumpscare(msg.username);
+      break;
   }
+}
+
+// ── GIF SEARCH ──
+gifBtn.addEventListener('click', () => {
+  gifPanel.classList.toggle('hidden');
+  if (!gifPanel.classList.contains('hidden')) gifSearch.focus();
+});
+
+let gifTimer = null;
+gifSearch.addEventListener('input', () => {
+  clearTimeout(gifTimer);
+  const q = gifSearch.value.trim();
+  if (q) gifTimer = setTimeout(() => loadGifs(q), 500);
+});
+
+async function loadGifs(query) {
+  gifGrid.innerHTML = '<p class="gif-hint">loading... 🔍</p>';
+  try {
+    const res = await fetch(`https://api.tenor.com/v1/search?q=${encodeURIComponent(query)}&key=${TENOR_KEY}&limit=12&media_filter=minimal&contentfilter=medium`);
+    const data = await res.json();
+    gifGrid.innerHTML = '';
+    data.results.forEach(r => {
+      const img = document.createElement('img');
+      img.className = 'gif-thumb';
+      img.src = r.media[0].tinygif?.url || r.media[0].gif.url;
+      img.loading = 'lazy';
+      img.onclick = () => {
+        send({ type: 'gif', url: r.media[0].gif.url });
+        gifPanel.classList.add('hidden');
+        gifSearch.value = '';
+        gifGrid.innerHTML = '<p class="gif-hint">type above to search 🔍</p>';
+      };
+      gifGrid.appendChild(img);
+    });
+  } catch (_) {
+    gifGrid.innerHTML = '<p class="gif-hint">failed 😭</p>';
+  }
+}
+
+function addGifMsg(sender, url) {
+  const el = document.createElement('div');
+  el.className = 'chat-msg';
+  el.innerHTML = `<span class="sender">${esc(sender)}</span>`;
+  const img = document.createElement('img');
+  img.className = 'chat-gif';
+  img.src = url;
+  el.appendChild(img);
+  chatMessages.appendChild(el);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// ── JUMPSCARE ──
+scareBtn.addEventListener('click', () => send({ type: 'jumpscare' }));
+
+function doJumpscare(from) {
+  const el = document.createElement('div');
+  el.className = 'scare-overlay';
+  el.textContent = '😱';
+  document.body.appendChild(el);
+  el.addEventListener('animationend', () => el.remove());
+  addSys(`${from} just jumpscared you 😱💀`);
 }
 
 // ── VIDEO SOURCE ──

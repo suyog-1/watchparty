@@ -365,6 +365,96 @@ input[type="range"]::-moz-range-thumb {
 .react-btn:hover { background: #ffffff10; transform: scale(1.2); }
 .react-btn:active { transform: scale(1.05); }
 
+.scare-btn {
+  margin-left: auto;
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: transform 0.12s;
+  letter-spacing: 0.5px;
+}
+.scare-btn:hover { transform: scale(1.08); }
+.scare-btn:active { transform: scale(0.96); }
+
+/* GIF panel */
+.gif-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid #ffffff10;
+  background: #1a0a2e60;
+}
+.gif-panel.hidden { display: none; }
+
+#gif-search {
+  background: var(--surface2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 7px 11px;
+  outline: none;
+  width: 100%;
+}
+#gif-search:focus { border-color: var(--accent); }
+
+#gif-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.gif-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.12s;
+}
+.gif-thumb:hover { opacity: 0.8; transform: scale(1.03); }
+
+.gif-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: center;
+  padding: 14px;
+  grid-column: 1 / -1;
+}
+
+.chat-msg .chat-gif {
+  max-width: 100%;
+  border-radius: 8px;
+  margin-top: 3px;
+}
+
+/* jumpscare flash */
+@keyframes wp-scare-flash {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.scare-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #ff0000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20vw;
+  animation: wp-scare-flash 0.7s ease-out forwards;
+  pointer-events: none;
+}
+
 /* ── CHAT PANEL ── */
 .chat-panel {
   width: 290px;

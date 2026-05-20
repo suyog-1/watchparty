@@ -88,8 +88,9 @@
           <button class="react-btn" data-emoji="😂">😂</button>
           <button class="react-btn" data-emoji="😱">😱</button>
           <button class="react-btn" data-emoji="👏">👏</button>
-          <button class="react-btn" data-emoji="😭">😭</button>
-          <button class="react-btn" data-emoji="🔥">🔥</button>
+          <button class="react-btn" data-emoji="🍿">🍿</button>
+          <button class="react-btn" data-emoji="💀">💀</button>
+          <button id="scare-btn" class="scare-btn">😈 SCARE</button>
         </div>
       </div>
 
@@ -97,8 +98,13 @@
       <div class="chat-panel">
         <div class="chat-header">chat &#10084;</div>
         <div id="chat-messages"></div>
+        <div id="gif-panel" class="gif-panel hidden">
+          <input id="gif-search" type="text" placeholder="search gifs..." autocomplete="off" />
+          <div id="gif-grid"><p class="gif-hint">type above to search 🔍</p></div>
+        </div>
         <div class="chat-input-row">
           <input id="chat-input" type="text" placeholder="say something..." maxlength="300" autocomplete="off" />
+          <button id="gif-btn" class="btn secondary small">GIF</button>
           <button id="chat-send-btn" class="btn primary small">&#10148;</button>
         </div>
       </div>
