@@ -76,6 +76,10 @@ createBtn.addEventListener('click', async () => {
   const tab = await getActiveTab();
   if (!tab) return showError("can't read the active tab 💀");
 
+  // make sure the latest content script is running on this tab
+  const ready = await ensureContentScript(tab.id);
+  if (!ready) return showError('refresh this tab (F5) then try again ⟳');
+
   chrome.storage.sync.set({ username });
   setBusy(createBtn, '🔄 connecting...');
   chrome.runtime.sendMessage({
@@ -96,8 +100,8 @@ async function doJoin() {
   const tab = await getActiveTab();
   if (!tab) return showError("can't read the active tab 💀");
 
-  // No video check on join — partner can join from any page,
-  // they'll get a clickable link when the host is on a video
+  const ready = await ensureContentScript(tab.id);
+  if (!ready) return showError('refresh this tab (F5) then try again ⟳');
 
   chrome.storage.sync.set({ username });
   setBusy(joinBtn, '🔄 joining...');
@@ -176,4 +180,32 @@ function checkTabHasVideo(tabId) {
       resolve(res?.hasVideo === true);
     });
   });
+}
+
+function pingContentScript(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { type: 'ping' }, (res) => {
+      if (chrome.runtime.lastError) return resolve(false);
+      resolve(res?.pong === true);
+    });
+  });
+}
+
+async function ensureContentScript(tabId) {
+  // first try a ping — if the latest content script is loaded, we're done
+  if (await pingContentScript(tabId)) return true;
+
+  // not loaded (or old version w/o ping handler) — try to inject fresh
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js'],
+    });
+    // wait a moment for listeners to register
+    await new Promise(r => setTimeout(r, 200));
+    return await pingContentScript(tabId);
+  } catch (e) {
+    // can't inject — probably chrome:// page or other restricted URL
+    return false;
+  }
 }

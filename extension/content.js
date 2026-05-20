@@ -2,6 +2,12 @@
 // Detects video, manages overlay UI, forwards everything via background service worker
 // (background owns the WebSocket so YouTube's CSP can't block it)
 
+// Guard against double-injection (extension reload + scripting.executeScript)
+if (window.__daddysparty_v3__) {
+  console.log("[daddy's party] already loaded, skipping");
+} else {
+  window.__daddysparty_v3__ = true;
+
 const IS_TOP = window === window.top;
 const TENOR_KEY = 'LIVDSRZULELA';
 
@@ -140,7 +146,16 @@ function wsSend(payload) {
 
 // ── MESSAGE LISTENER ─────────────────────────────────────────────────────────
 
+// log so we can verify content script loaded
+console.log("[daddy's party 🎬] content script loaded on", location.href);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // ping handler — popup uses this to verify content script is loaded
+  if (msg.type === 'ping') {
+    sendResponse({ pong: true, version: 3 });
+    return true;
+  }
+
   // popup checking if there's a video on this page (lenient — just any <video>)
   if (msg.type === 'check-video') {
     sendResponse({ hasVideo: !!document.querySelector('video') });
@@ -697,3 +712,5 @@ function popReaction(emoji) {
 }
 
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+} // end of double-injection guard
