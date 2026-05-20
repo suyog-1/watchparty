@@ -11,12 +11,31 @@ if (window.__daddysparty_v3__) {
 const IS_TOP = window === window.top;
 const TENOR_KEY = 'LIVDSRZULELA';
 
+// Returns true if our extension context is still valid (not invalidated by reload)
+function extContextValid() {
+  try { return !!chrome?.runtime?.id; } catch { return false; }
+}
+
+// Safe runtime call wrappers — throw nothing even if context is dead
+function safeSendMessage(msg, cb) {
+  if (!extContextValid()) return;
+  try {
+    const p = chrome.runtime.sendMessage(msg, cb);
+    if (p?.catch) p.catch(() => {});
+  } catch { /* context dead — silently drop */ }
+}
+
+function safeConnect(opts) {
+  if (!extContextValid()) return null;
+  try { return chrome.runtime.connect(opts); } catch { return null; }
+}
+
 // Keep service worker alive while overlay is open
 let keepalivePort = null;
 function startKeepalive() {
   if (keepalivePort) return;
-  keepalivePort = chrome.runtime.connect({ name: 'dp-keepalive' });
-  keepalivePort.onDisconnect.addListener(() => { keepalivePort = null; });
+  keepalivePort = safeConnect({ name: 'dp-keepalive' });
+  if (keepalivePort) keepalivePort.onDisconnect.addListener(() => { keepalivePort = null; });
 }
 
 // ── FUNNY MESSAGES ────────────────────────────────────────────────────────────
@@ -67,7 +86,7 @@ function attachVideo(video) {
   video.addEventListener('play',   onPlay);
   video.addEventListener('pause',  onPause);
   video.addEventListener('seeked', onSeeked);
-  chrome.runtime.sendMessage({ type: 'register-video-frame' }).catch(() => {});
+  safeSendMessage({ type: 'register-video-frame' });
   if (IS_TOP) {
     if (shadow) appendSys('video found — sync ready 🎬');
     else videoFoundPending = true;
@@ -106,7 +125,7 @@ function onSeeked() { if (!isSyncing && inRoom) emitVideoEvent(videoEl.paused ? 
 
 function emitVideoEvent(action, currentTime) {
   if (IS_TOP) wsSend({ type: 'playback', action, currentTime });
-  else chrome.runtime.sendMessage({ type: 'iframe-video-event', action, currentTime }).catch(() => {});
+  else safeSendMessage({ type: 'iframe-video-event', action, currentTime });
 }
 
 function applyPlayback(action, currentTime) {
@@ -166,6 +185,7 @@ function pollForVideo() {
   videoMutObs.observe(document.documentElement, { childList: true, subtree: true });
   // backup: periodic poll in case MutationObserver misses it (YouTube can be tricky)
   videoPollInterval = setInterval(() => {
+    if (!extContextValid()) { stop(); return; }
     const v = findVideo();
     if (v) { stop(); attachVideo(v); }
   }, 500);
@@ -176,8 +196,11 @@ if (_v0) attachVideo(_v0); else pollForVideo();
 
 // Sync heartbeat every 2s
 let heartbeatLoggedNoVideo = 0;
+let heartbeatInterval = null;
 if (IS_TOP) {
-  setInterval(() => {
+  heartbeatInterval = setInterval(() => {
+    // if extension was reloaded, stop firing — old script is orphaned
+    if (!extContextValid()) { clearInterval(heartbeatInterval); return; }
     if (!inRoom) return;
     if (!videoEl) {
       heartbeatLoggedNoVideo++;
@@ -206,8 +229,9 @@ if (IS_TOP) {
   // On page load: check if this tab is already in a party (e.g. after auto-nav)
   // and restore the overlay state
   setTimeout(() => {
-    chrome.runtime.sendMessage({ type: 'is-in-party' }, (res) => {
-      if (chrome.runtime.lastError || !res?.inParty) return;
+    if (!extContextValid()) return;
+    safeSendMessage({ type: 'is-in-party' }, (res) => {
+      if (chrome.runtime?.lastError || !res?.inParty) return;
       inRoom = true;
       isHost = res.isHost === true; // restore role from background
       startKeepalive();
@@ -226,7 +250,7 @@ if (IS_TOP) {
 // ── WS HELPER (sends through background) ─────────────────────────────────────
 
 function wsSend(payload) {
-  chrome.runtime.sendMessage({ type: 'ws-send', payload }).catch(() => {});
+  safeSendMessage({ type: 'ws-send', payload });
 }
 
 // ── MESSAGE LISTENER ─────────────────────────────────────────────────────────
@@ -290,7 +314,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case 'apply-to-video-frame':
       // route through background
-      chrome.runtime.sendMessage(msg).catch(() => {});
+      safeSendMessage(msg);
       break;
   }
   return true;
