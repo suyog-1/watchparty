@@ -135,7 +135,11 @@ function emitVideoEvent(action, currentTime) {
 function applyPlayback(action, currentTime) {
   if (!videoEl) {
     pendingPlayback = { action, currentTime };
-    if (IS_TOP) appendSys('queued — waiting for video to load ⏳');
+    // only log "queued" once per page, and only if we don't know about an iframe video
+    if (IS_TOP && !videoInIframeId && !window.__dp_queued_logged__) {
+      window.__dp_queued_logged__ = true;
+      appendSys('queued — waiting for video to load ⏳');
+    }
     return;
   }
   isSyncing = true;
@@ -291,9 +295,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // playback from background (top frame) → apply to local video
+  // playback from background → apply to local video (iframe or main)
   if (msg.type === 'apply-playback') {
+    const hadVideo = !!videoEl;
     applyPlayback(msg.action, msg.currentTime);
+    // tell top frame so user can see iframe is receiving sync events
+    if (!IS_TOP) {
+      safeSendMessage({
+        type: 'iframe-debug',
+        text: hadVideo
+          ? `iframe synced → ${msg.action} @ ${msg.currentTime.toFixed(0)}s`
+          : `iframe got msg but no video yet — re-scanning`,
+      });
+      if (!hadVideo) {
+        // try to re-find video right now
+        const v = findVideo();
+        if (v) attachVideo(v);
+      }
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // iframe debug message — relayed to top frame for display
+  if (msg.type === 'iframe-debug') {
+    if (IS_TOP) appendSys(msg.text);
     sendResponse({ ok: true });
     return true;
   }

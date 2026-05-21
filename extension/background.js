@@ -123,6 +123,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       sendResponse({ ok: true }); break;
 
+    case 'iframe-debug':
+      // relay iframe debug message to the tab's top frame for display
+      if (senderTabId !== undefined) {
+        chrome.tabs.sendMessage(senderTabId, msg, { frameId: 0 }).catch(() => {});
+      }
+      sendResponse({ ok: true }); break;
+
     case 'apply-to-video-frame': {
       const vfid = videoFrames[senderTabId];
       if (vfid !== undefined && vfid !== 0) {
