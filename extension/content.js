@@ -223,8 +223,24 @@ setInterval(() => {
     if (heartbeatLoggedNoVideo === 5) {
       const count = document.querySelectorAll('video').length;
       const iframes = document.querySelectorAll('iframe').length;
-      appendSys(`⚠️ no video found (${count} <video>, ${iframes} <iframe> on page)`);
+      appendSys(`⚠️ top frame: ${count} <video>, ${iframes} <iframe>`);
       pollForVideo();
+    }
+    return;
+  }
+
+  // non-top frame: report periodically so we can see what's inside the nested iframes
+  if (!IS_TOP && !videoEl) {
+    heartbeatLoggedNoVideo++;
+    if (heartbeatLoggedNoVideo === 3) {
+      // bubble up info about this frame to the top frame's overlay
+      const count = document.querySelectorAll('video').length;
+      const iframes = document.querySelectorAll('iframe').length;
+      const url = location.href.slice(0, 60);
+      safeSendMessage({
+        type: 'iframe-debug',
+        text: `iframe (${url}): ${count} <video>, ${iframes} <iframe>`,
+      });
     }
     return;
   }
@@ -274,6 +290,8 @@ if (IS_TOP) {
         pendingPlayback = { action: res.state.action, currentTime: res.state.currentTime };
       }
       appendSys('reconnected — catching up 🎬');
+      // host re-broadcasts URL after navigation so joiner can follow
+      if (isHost) wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
     });
   }, 100);
