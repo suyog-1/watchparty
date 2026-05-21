@@ -215,6 +215,30 @@ function pollForVideo() {
 const _v0 = findVideo();
 if (_v0) attachVideo(_v0); else pollForVideo();
 
+// METASTREAM-STYLE EVENT CAPTURE
+// Catch dynamically-created videos the moment they fire play / durationchange.
+// Far more reliable than polling on shady sites that remount the video element.
+function videoEventCapture(e) {
+  const target = e.target;
+  if (!(target instanceof HTMLMediaElement)) return;
+  if (target.tagName !== 'VIDEO') return;
+  // skip short videos (likely previews/thumbnails)
+  if (isFinite(target.duration) && target.duration > 0 && target.duration < 60) return;
+  // attach if this is a better candidate than current
+  if (videoEl !== target) {
+    const currentDur = videoEl?.duration || 0;
+    const newDur = target.duration || 0;
+    // prefer longer-duration videos (the actual movie, not previews)
+    if (!videoEl || newDur > currentDur || !videoEl.isConnected) {
+      attachVideo(target);
+    }
+  }
+}
+document.addEventListener('play',           videoEventCapture, true);
+document.addEventListener('durationchange', videoEventCapture, true);
+document.addEventListener('loadedmetadata', videoEventCapture, true);
+document.addEventListener('canplay',        videoEventCapture, true);
+
 // Sync heartbeat every 2s. Runs in any frame that has the videoEl.
 // - Top frame with video: send directly to WS via wsSend
 // - Iframe with video: send via 'iframe-heartbeat' to background, it'll relay
@@ -273,15 +297,25 @@ setInterval(() => {
   }
 }, 2000);
 
-// ── URL CHANGE DETECTION (top frame only) ─────────────────────────────────────
-if (IS_TOP) {
+// ── URL CHANGE DETECTION ─────────────────────────────────────────────
+// Top frame: broadcasts full page navigations
+// Iframe: broadcasts embed URL changes (e.g. shady site server-switching)
+{
   let lastUrl = location.href;
   new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
+    if (location.href === lastUrl) return;
+    const oldUrl = lastUrl;
+    lastUrl = location.href;
+    if (IS_TOP) {
       if (inRoom) wsSend({ type: 'url-change', url: location.href });
+    } else {
+      // iframe URL changed — tell background, which forwards to room
+      safeSendMessage({ type: 'iframe-url-change', url: location.href, oldUrl });
     }
   }).observe(document, { subtree: true, childList: true });
+}
+
+if (IS_TOP) {
 
   // On page load: check if this tab is already in a party (e.g. after auto-nav)
   // and restore the overlay state

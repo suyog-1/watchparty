@@ -145,6 +145,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       sendResponse({ ok: true }); break;
 
+    case 'iframe-url-change':
+      // shady site server-switch: log to top frame chat
+      // (don't auto-navigate joiner — they probably can't navigate their iframe directly)
+      if (senderTabId !== undefined) {
+        const short = msg.url.replace(/^https?:\/\//, '').slice(0, 60);
+        chrome.tabs.sendMessage(senderTabId, {
+          type: 'iframe-debug',
+          text: `iframe switched source → ${short}…`,
+        }, { frameId: 0 }).catch(() => {});
+      }
+      sendResponse({ ok: true }); break;
+
     case 'apply-to-video-frame': {
       const vfid = videoFrames[senderTabId];
       if (vfid !== undefined && vfid !== 0) {
