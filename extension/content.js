@@ -123,9 +123,17 @@ function detachVideo() {
   videoEl = null;
 }
 
-function onPlay()   { if (!isSyncing && inRoom) emitVideoEvent('play',  videoEl.currentTime); }
-function onPause()  { if (!isSyncing && inRoom) emitVideoEvent('pause', videoEl.currentTime); }
-function onSeeked() { if (!isSyncing && inRoom) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
+// Top frame checks inRoom locally; iframes always emit and let background gate
+// (because iframes never receive ws-msg so inRoom would always be false there)
+function onPlay()   { if (eventGate()) emitVideoEvent('play',  videoEl.currentTime); }
+function onPause()  { if (eventGate()) emitVideoEvent('pause', videoEl.currentTime); }
+function onSeeked() { if (eventGate()) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
+
+function eventGate() {
+  if (isSyncing) return false;
+  if (IS_TOP) return inRoom; // top frame: only emit when actually in a room
+  return true; // iframe: always emit, background will discard if not in room
+}
 
 function emitVideoEvent(action, currentTime) {
   if (IS_TOP) wsSend({ type: 'playback', action, currentTime });

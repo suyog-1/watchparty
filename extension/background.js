@@ -100,7 +100,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (senderTabId !== undefined) {
         videoFrames[senderTabId] = senderFrameId;
         if (senderFrameId !== 0) {
+          // tell top frame about the iframe so it can show "video found in iframe"
           chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
+          // immediately push current playback state to the iframe so it catches up to host
+          if (lastState) {
+            chrome.tabs.sendMessage(senderTabId, {
+              type: 'apply-playback',
+              action: lastState.action,
+              currentTime: lastState.currentTime,
+            }, { frameId: senderFrameId }).catch(() => {});
+          }
         }
       }
       sendResponse({ ok: true }); break;
