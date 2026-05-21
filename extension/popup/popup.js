@@ -211,13 +211,12 @@ async function ensureContentScript(tabId) {
   // first try a ping — if the latest content script is loaded, we're done
   if (await pingContentScript(tabId)) return { ok: true };
 
-  // not loaded (or old version w/o ping handler) — try to inject fresh
+  // not loaded — inject into ALL frames so iframes (movie embeds) also get it
   try {
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ['content.js'],
     });
-    // wait longer for listeners to register (some browsers slower)
     await new Promise(r => setTimeout(r, 500));
     if (await pingContentScript(tabId)) return { ok: true };
     return { ok: false, reason: 'injected but no response — site may be blocking extensions' };

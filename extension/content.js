@@ -201,8 +201,8 @@ if (_v0) attachVideo(_v0); else pollForVideo();
 // - Top frame with video: send directly to WS via wsSend
 // - Iframe with video: send via 'iframe-heartbeat' to background, it'll relay
 let heartbeatLoggedNoVideo = 0;
-let heartbeatInterval = setInterval(() => {
-  if (!extContextValid()) { clearInterval(heartbeatInterval); return; }
+setInterval(() => {
+  if (!extContextValid()) return; // silently skip on dead context, don't stop forever
 
   // top frame: warn if no video found locally AND no iframe has registered one
   if (IS_TOP && !videoEl && !videoInIframeId) {
