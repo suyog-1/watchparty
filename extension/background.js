@@ -9,6 +9,7 @@ let lastMembers   = [];       // for restoring overlay after page navigation
 let lastState     = null;     // last known playback state {action, currentTime} for restoration
 let isHost        = false;    // were we the creator? need to preserve across nav
 let videoFrames   = {};       // tabId → frameId holding <video>
+let videoFrameDurations = {}; // tabId → duration of attached video (for picking best frame)
 let keepalivePorts = new Set();
 
 // Restore state on service worker startup (handles SW being killed/restarted)
@@ -98,17 +99,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // frame routing (iframe video detection)
     case 'register-video-frame':
       if (senderTabId !== undefined) {
-        videoFrames[senderTabId] = senderFrameId;
-        if (senderFrameId !== 0) {
-          // tell top frame about the iframe so it can show "video found in iframe"
-          chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
-          // immediately push current playback state to the iframe so it catches up to host
-          if (lastState) {
-            chrome.tabs.sendMessage(senderTabId, {
-              type: 'apply-playback',
-              action: lastState.action,
-              currentTime: lastState.currentTime,
-            }, { frameId: senderFrameId }).catch(() => {});
+        const newDur = msg.duration || 0;
+        const currentDur = videoFrameDurations[senderTabId] || 0;
+        // only pick this iframe if it has longer duration (= more likely the actual movie)
+        // or if we don't have one yet
+        if (videoFrames[senderTabId] === undefined || newDur > currentDur) {
+          videoFrames[senderTabId] = senderFrameId;
+          videoFrameDurations[senderTabId] = newDur;
+          if (senderFrameId !== 0) {
+            chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
+            if (lastState) {
+              chrome.tabs.sendMessage(senderTabId, {
+                type: 'apply-playback',
+                action: lastState.action,
+                currentTime: lastState.currentTime,
+              }, { frameId: senderFrameId }).catch(() => {});
+            }
           }
         }
       }

@@ -90,7 +90,11 @@ function attachVideo(video) {
   video.addEventListener('play',   onPlay);
   video.addEventListener('pause',  onPause);
   video.addEventListener('seeked', onSeeked);
-  safeSendMessage({ type: 'register-video-frame' });
+  // tell background about us — include duration so it can pick the best iframe
+  safeSendMessage({
+    type: 'register-video-frame',
+    duration: isFinite(video.duration) ? video.duration : 0,
+  });
   if (IS_TOP) {
     if (shadow) appendSys('video found — sync ready 🎬');
     else videoFoundPending = true;
@@ -132,7 +136,9 @@ function onSeeked() { if (eventGate()) emitVideoEvent(videoEl.paused ? 'pause' :
 function eventGate() {
   if (isSyncing) return false;
   if (IS_TOP) return inRoom; // top frame: only emit when actually in a room
-  return true; // iframe: always emit, background will discard if not in room
+  // iframe: skip preview/thumbnail videos (short duration). Only the actual movie syncs.
+  if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
+  return true;
 }
 
 function emitVideoEvent(action, currentTime) {
@@ -247,6 +253,10 @@ setInterval(() => {
 
   // only the frame WITH videoEl broadcasts state
   if (!videoEl) return;
+
+  // iframes: skip preview/thumbnail videos. Only the real movie heartbeats.
+  if (!IS_TOP && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return;
+
   heartbeatLoggedNoVideo = 0;
 
   const action = videoEl.paused ? 'pause' : 'play';
@@ -259,7 +269,6 @@ setInterval(() => {
       action, currentTime,
     });
   } else {
-    // iframe — background knows if we're in a room + isHost
     safeSendMessage({ type: 'iframe-heartbeat', action, currentTime });
   }
 }, 2000);
