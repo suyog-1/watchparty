@@ -63,6 +63,13 @@ let attachedAt = 0; // timestamp when video was attached — for "settle window"
 let lastVisibilityChange = 0; // timestamp of last visibilitychange — suppress pause events from tab-switching
 let weJustSeeked = false; // flag — true briefly after WE programmatically set currentTime
 const SCRIPT_LOAD_TIME = Date.now(); // for settle window (vs attachedAt which can reset)
+let lastUserClickTime = 0; // timestamp of last real user gesture — required for outbound events
+let autoplayBlocked = false; // true if browser refused our last play() call
+
+// Track real user interaction so we can distinguish user actions from player auto-events
+document.addEventListener('click',    () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
+document.addEventListener('keydown',  () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
+document.addEventListener('touchend', () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
 
 document.addEventListener('visibilitychange', () => {
   lastVisibilityChange = Date.now();
@@ -150,18 +157,21 @@ function onSeeked() { if (eventGate('seek'))  emitVideoEvent(videoEl.paused ? 'p
 
 function eventGate(kind) {
   if (isSyncing) return false;
-  // if WE just programmatically set currentTime, the trailing 'seeked' event isn't a user action
   if (kind === 'seek' && weJustSeeked) return false;
 
   if (IS_TOP && !inRoom) return false;
   // iframes: skip preview/thumbnail videos (short duration)
   if (!IS_TOP && videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
-  // navigation settle window: 5s from PAGE LOAD (not from attach — attach can re-fire
-  // many times during normal playback as event capture catches new elements)
+  // CRITICAL: only emit if there was a real user gesture in the last 3 seconds.
+  // This filters out player auto-events (autoplay attempts, auto-resume from 0) so
+  // they don't broadcast as "user pressed play at 0s" and confuse the other side.
+  if (Date.now() - lastUserClickTime > 3000) return false;
+
+  // settle window from PAGE LOAD (handles shady site auto-resume)
   if (kind === 'seek' && Date.now() - SCRIPT_LOAD_TIME < 5000) return false;
 
-  // tab-switch suppression: ignore pause events within 500ms of a visibility change
+  // tab-switch suppression
   if (kind === 'pause' && lastVisibilityChange && Date.now() - lastVisibilityChange < 500) return false;
 
   return true;
@@ -175,7 +185,6 @@ function emitVideoEvent(action, currentTime) {
 function applyPlayback(action, currentTime) {
   if (!videoEl) {
     pendingPlayback = { action, currentTime };
-    // only log "queued" once per page, and only if we don't know about an iframe video
     if (IS_TOP && !videoInIframeId && !window.__dp_queued_logged__) {
       window.__dp_queued_logged__ = true;
       appendSys('queued — waiting for video to load ⏳');
@@ -188,15 +197,21 @@ function applyPlayback(action, currentTime) {
   if (diff > 1.5) {
     weJustSeeked = true;
     videoEl.currentTime = currentTime;
-    setTimeout(() => { weJustSeeked = false; }, 2500); // YouTube takes ~1-2s to settle
+    setTimeout(() => { weJustSeeked = false; }, 2500);
     if (IS_TOP) appendSys(`🎯 seeked ${oldTime.toFixed(0)}s → ${currentTime.toFixed(0)}s`);
   }
   if (action === 'play') {
-    videoEl.play().catch(() => {
+    // if autoplay was already blocked, don't keep trying — just show banner
+    if (autoplayBlocked) {
       showAutoplayBanner();
-    });
+    } else {
+      videoEl.play().catch(() => {
+        autoplayBlocked = true;
+        showAutoplayBanner();
+      });
+    }
   } else {
-    videoEl.pause();
+    videoEl.pause(); // pause always works without user gesture
   }
   setTimeout(() => { isSyncing = false; }, 1500);
 }
@@ -217,9 +232,15 @@ function showAutoplayBanner() {
   const style = document.createElement('style');
   style.textContent = '@keyframes dp-pulse{from{transform:translate(-50%,-50%) scale(1)}to{transform:translate(-50%,-50%) scale(1.05)}}';
   document.head.appendChild(style);
-  banner.onclick = () => { banner.remove(); style.remove(); if (videoEl) videoEl.play().catch(()=>{}); };
+  banner.onclick = () => {
+    banner.remove();
+    style.remove();
+    autoplayBlocked = false;
+    lastUserClickTime = Date.now();
+    if (videoEl) videoEl.play().catch(() => { autoplayBlocked = true; });
+  };
   (document.fullscreenElement || document.body || document.documentElement).appendChild(banner);
-  setTimeout(() => { banner.remove(); style.remove(); }, 8000);
+  // banner stays until user clicks (don't auto-remove — they need to interact for sync to work)
 }
 
 function pollForVideo() {
