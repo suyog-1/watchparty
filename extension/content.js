@@ -61,6 +61,8 @@ let videoInIframeId = null; // (top frame only) frameId of iframe holding the vi
 let shadow = null;
 let attachedAt = 0; // timestamp when video was attached — for "settle window" after page nav
 let lastVisibilityChange = 0; // timestamp of last visibilitychange — suppress pause events from tab-switching
+let weJustSeeked = false; // flag — true briefly after WE programmatically set currentTime
+const SCRIPT_LOAD_TIME = Date.now(); // for settle window (vs attachedAt which can reset)
 
 document.addEventListener('visibilitychange', () => {
   lastVisibilityChange = Date.now();
@@ -148,20 +150,18 @@ function onSeeked() { if (eventGate('seek'))  emitVideoEvent(videoEl.paused ? 'p
 
 function eventGate(kind) {
   if (isSyncing) return false;
-  // if the player is mid-seek (still buffering/settling), suppress — those events are
-  // tail-end of our own seek, not user actions
-  if (videoEl?.seeking) return false;
+  // if WE just programmatically set currentTime, the trailing 'seeked' event isn't a user action
+  if (kind === 'seek' && weJustSeeked) return false;
 
   if (IS_TOP && !inRoom) return false;
   // iframes: skip preview/thumbnail videos (short duration)
   if (!IS_TOP && videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
-  // navigation settle window: suppress outbound seeks for 5s after attach.
-  // Stops fight with shady players that auto-resume to "last watched position"
-  if (kind === 'seek' && attachedAt && Date.now() - attachedAt < 5000) return false;
+  // navigation settle window: 5s from PAGE LOAD (not from attach — attach can re-fire
+  // many times during normal playback as event capture catches new elements)
+  if (kind === 'seek' && Date.now() - SCRIPT_LOAD_TIME < 5000) return false;
 
-  // tab-switch suppression: ignore pause events within 500ms of a visibility change.
-  // Browser pauses background videos sometimes — don't broadcast those as user pause
+  // tab-switch suppression: ignore pause events within 500ms of a visibility change
   if (kind === 'pause' && lastVisibilityChange && Date.now() - lastVisibilityChange < 500) return false;
 
   return true;
@@ -186,7 +186,9 @@ function applyPlayback(action, currentTime) {
   const oldTime = videoEl.currentTime;
   const diff = Math.abs(oldTime - currentTime);
   if (diff > 1.5) {
+    weJustSeeked = true;
     videoEl.currentTime = currentTime;
+    setTimeout(() => { weJustSeeked = false; }, 2500); // YouTube takes ~1-2s to settle
     if (IS_TOP) appendSys(`🎯 seeked ${oldTime.toFixed(0)}s → ${currentTime.toFixed(0)}s`);
   }
   if (action === 'play') {
@@ -347,10 +349,23 @@ if (IS_TOP) {
   // and restore the overlay state
   setTimeout(() => {
     if (!extContextValid()) return;
+    // distinguish OUR auto-nav (joiner being pulled to host's URL) from user-initiated nav
+    const wasAutoNav = sessionStorage.getItem('dp-auto-nav') === '1';
+    sessionStorage.removeItem('dp-auto-nav');
+
     safeSendMessage({ type: 'is-in-party' }, (res) => {
       if (chrome.runtime?.lastError || !res?.inParty) return;
+
+      if (!wasAutoNav) {
+        // user manually navigated — they're leaving the party. Other person stays in room.
+        // Just disconnect THIS side; the room (and the other person) remains intact.
+        safeSendMessage({ type: 'disconnect' });
+        return;
+      }
+
+      // this was our auto-nav, restore party state
       inRoom = true;
-      isHost = res.isHost === true; // restore role from background
+      isHost = res.isHost === true;
       startKeepalive();
       showOverlay();
       overlaySetRoom(res.roomId);
@@ -359,8 +374,6 @@ if (IS_TOP) {
         pendingPlayback = { action: res.state.action, currentTime: res.state.currentTime };
       }
       appendSys('reconnected — catching up 🎬');
-      // host re-broadcasts URL after navigation so joiner can follow
-      if (isHost) wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
     });
   }, 100);
@@ -477,27 +490,28 @@ function handleServerMsg(msg) {
     case 'created':
       inRoom = true;
       isHost = true; // we created the room — we're the sync authority
+      clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
-      appendSys("you're in! 🎉 you're the HOST — sync flows from your video");
+      appendSys("you're in! 🎉 you're the HOST");
       wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
       break;
 
     case 'joined':
       inRoom = true;
-      isHost = false; // we joined someone else's room — they're the authority
+      isHost = false;
+      clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
-      // queue the room's current playback state so we sync to where host is
       if (msg.state) {
         pendingPlayback = { action: msg.state.playing ? 'play' : 'pause', currentTime: msg.state.currentTime };
       }
-      // if room already has a URL, auto-navigate there
       if (msg.lastUrl && msg.lastUrl !== location.href) {
+        sessionStorage.setItem('dp-auto-nav', '1'); // flag: WE initiated this nav, not the user
         appendSys(`taking you to where they're watching… 🎬`);
         setTimeout(() => { location.href = msg.lastUrl; }, 800);
         break;
       }
-      appendSys("you're in! 🎉 you're the JOINER — follow the host's video");
+      appendSys("you're in! 🎉 you're the JOINER");
       attachVideoOrPoll();
       break;
     case 'error':
@@ -542,13 +556,11 @@ function handleServerMsg(msg) {
     case 'reaction':   popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
     case 'jumpscare':  doJumpscare(msg.username); break;
     case 'url-change':
-      // auto-navigate to follow partner — content script will re-init on new page
+      // just notify — don't auto-navigate. If user wants to follow, they navigate manually.
+      // (manual nav will trigger the "user left party" flow which is what we want)
       if (msg.url !== location.href) {
-        appendSys(`${msg.username} is at: ${msg.url.slice(0, 50)}…`);
-        appendSys(`taking you there… 🎬`);
-        setTimeout(() => { location.href = msg.url; }, 800);
-      } else {
-        appendSys(`✓ same page as ${msg.username} — ready to watch`);
+        const short = msg.url.replace(/^https?:\/\//, '').slice(0, 60);
+        appendSys(`${msg.username} moved to ${short}`);
       }
       break;
   }
@@ -933,6 +945,12 @@ function overlaySetMembers(m) {
 
 function appendChat(who, text) { if (shadow) append(false, who, text); }
 function appendSys(text)       { if (shadow) append(true,  '•',  text); }
+
+function clearChatLog() {
+  if (!shadow) return;
+  const log = shadow.getElementById('log');
+  if (log) log.innerHTML = '';
+}
 
 function appendGif(who, url) {
   if (!shadow) return;
