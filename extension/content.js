@@ -160,10 +160,8 @@ function eventGate(kind) {
   if (kind === 'seek' && weJustSeeked) return false;
 
   if (IS_TOP && !inRoom) return false;
-  // top frame: if an iframe has the real video, don't broadcast from our (likely thumbnail) video
-  if (IS_TOP && videoInIframeId) return false;
-  // iframes: skip preview/thumbnail videos (short duration)
-  if (!IS_TOP && videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
+  // skip preview/thumbnail/ad videos (any frame) — duration too short to be the main movie
+  if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
   // CRITICAL: only emit if there was a real user gesture in the last 3 seconds.
   // This filters out player auto-events (autoplay attempts, auto-resume from 0) so
@@ -180,8 +178,13 @@ function eventGate(kind) {
 }
 
 function emitVideoEvent(action, currentTime) {
-  if (IS_TOP) wsSend({ type: 'playback', action, currentTime });
-  else safeSendMessage({ type: 'iframe-video-event', action, currentTime });
+  if (IS_TOP) {
+    wsSend({ type: 'playback', action, currentTime });
+    appendSys(`📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s`);
+  } else {
+    safeSendMessage({ type: 'iframe-video-event', action, currentTime });
+    safeSendMessage({ type: 'iframe-debug', text: `📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s` });
+  }
 }
 
 function applyPlayback(action, currentTime) {
@@ -329,8 +332,8 @@ setInterval(() => {
   // only the frame WITH videoEl broadcasts state
   if (!videoEl) return;
 
-  // iframes: skip preview/thumbnail videos. Only the real movie heartbeats.
-  if (!IS_TOP && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return;
+  // skip preview/thumbnail videos in ANY frame (not just iframes)
+  if (isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return;
 
   heartbeatLoggedNoVideo = 0;
 
@@ -339,8 +342,6 @@ setInterval(() => {
 
   if (IS_TOP) {
     if (!inRoom) return;
-    // if an iframe has the real video, let it broadcast — don't compete from a thumbnail
-    if (videoInIframeId) return;
     wsSend({
       type: isHost ? 'playback' : 'state-ping',
       action, currentTime,
