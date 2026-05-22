@@ -66,6 +66,10 @@ const SCRIPT_LOAD_TIME = Date.now(); // for settle window (vs attachedAt which c
 let lastUserClickTime = 0; // timestamp of last real user gesture — required for outbound events
 let lastUserActionAt = 0; // timestamp of last user action we EMITTED — suppress in-flight sync from yanking us back
 let autoplayBlocked = false; // true if browser refused our last play() call
+// drift-check state: what we last know about the shared playback
+let lastSharedAction = null;   // 'play' / 'pause' / null
+let lastSharedTime = 0;        // currentTime at the moment of the last shared event
+let lastSharedAt = 0;          // local Date.now() when we received/sent it
 
 // Track real user interaction so we can distinguish user actions from player auto-events
 document.addEventListener('click',    () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
@@ -179,7 +183,12 @@ function eventGate(kind) {
 }
 
 function emitVideoEvent(action, currentTime) {
-  lastUserActionAt = Date.now(); // protect against in-flight host heartbeats yanking us back
+  lastUserActionAt = Date.now();
+  // record OUR action as the shared baseline (both sides will then compute drift from same anchor)
+  lastSharedAction = action;
+  lastSharedTime = currentTime;
+  lastSharedAt = Date.now();
+
   if (IS_TOP) {
     wsSend({ type: 'playback', action, currentTime });
     appendSys(`📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s`);
@@ -190,6 +199,11 @@ function emitVideoEvent(action, currentTime) {
 }
 
 function applyPlayback(action, currentTime) {
+  // record the shared timeline anchor whenever we receive a sync event
+  lastSharedAction = action;
+  lastSharedTime = currentTime;
+  lastSharedAt = Date.now();
+
   if (!videoEl) {
     pendingPlayback = { action, currentTime };
     if (IS_TOP && !videoInIframeId && !window.__dp_queued_logged__) {
@@ -342,16 +356,31 @@ setInterval(() => {
   const action = videoEl.paused ? 'pause' : 'play';
   const currentTime = videoEl.currentTime;
 
+  // SILENT state-ping (never broadcast — server stores for late joiners only)
   if (IS_TOP) {
-    if (!inRoom) return;
-    wsSend({
-      type: isHost ? 'playback' : 'state-ping',
-      action, currentTime,
-    });
+    if (inRoom) wsSend({ type: 'state-ping', action, currentTime });
   } else {
     safeSendMessage({ type: 'iframe-heartbeat', action, currentTime });
   }
-}, 2000);
+
+  // ── DRIFT CHECK — local computation, no network ──────────────────
+  // Compare our position to where we SHOULD be based on the last shared event.
+  // If drifted by more than 3s, quietly correct. Both sides converge to same expected value.
+  if (lastSharedAction && Date.now() - lastUserActionAt > 5000 && !isSyncing && !autoplayBlocked) {
+    let expected = lastSharedTime;
+    if (lastSharedAction === 'play') {
+      expected += (Date.now() - lastSharedAt) / 1000;
+    }
+    const drift = Math.abs(currentTime - expected);
+    if (drift > 3) {
+      weJustSeeked = true;
+      videoEl.currentTime = expected;
+      setTimeout(() => { weJustSeeked = false; }, 2500);
+      if (IS_TOP) appendSys(`drift ${drift.toFixed(0)}s — corrected`);
+      else safeSendMessage({ type: 'iframe-debug', text: `drift ${drift.toFixed(0)}s — corrected` });
+    }
+  }
+}, 5000);
 
 // ── URL CHANGE DETECTION ─────────────────────────────────────────────
 // Top frame: broadcasts full page navigations
@@ -537,6 +566,9 @@ function handleServerMsg(msg) {
       overlaySetRoom(msg.roomId);
       if (msg.state) {
         pendingPlayback = { action: msg.state.playing ? 'play' : 'pause', currentTime: msg.state.currentTime };
+        lastSharedAction = msg.state.playing ? 'play' : 'pause';
+        lastSharedTime = msg.state.currentTime;
+        lastSharedAt = Date.now();
       }
       if (msg.lastUrl && msg.lastUrl !== location.href) {
         sessionStorage.setItem('dp-auto-nav', '1'); // flag: WE initiated this nav, not the user

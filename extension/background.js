@@ -133,11 +133,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
 
     case 'iframe-heartbeat':
-      // same gating: only the best iframe broadcasts heartbeats
+      // silent state-ping only (no host/joiner asymmetry — sync is event-driven now)
       if (senderTabId !== undefined && videoFrames[senderTabId] === senderFrameId
           && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
         ws.send(JSON.stringify({
-          type: isHost ? 'playback' : 'state-ping',
+          type: 'state-ping',
           action: msg.action,
           currentTime: msg.currentTime,
         }));
