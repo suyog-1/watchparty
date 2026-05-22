@@ -260,7 +260,8 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    console.log('[daddys party] ws closed', { code: event?.code, reason: event?.reason, wasClean: event?.wasClean });
     const wasConnected = roomId && roomId !== 'CONNECTING';
     const prevRoomId = roomId;
     ws = null;

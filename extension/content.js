@@ -158,7 +158,17 @@ function detachVideo() {
 // Top frame checks inRoom locally; iframes always emit and let background gate
 function onPlay()   { if (eventGate('play'))  emitVideoEvent('play',  videoEl.currentTime); }
 function onPause()  { if (eventGate('pause')) emitVideoEvent('pause', videoEl.currentTime); }
-function onSeeked() { if (eventGate('seek'))  emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
+
+// debounce seeked — players fire 2-4 seeked events for one user scrub (decode, finalize, etc).
+// We only want to emit ONE event per user action, otherwise the receiver's video bounces.
+let seekDebounceTimer = null;
+function onSeeked() {
+  if (!eventGate('seek')) return;
+  clearTimeout(seekDebounceTimer);
+  seekDebounceTimer = setTimeout(() => {
+    if (videoEl) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime);
+  }, 400);
+}
 
 function eventGate(kind) {
   if (isSyncing) return false;
@@ -168,16 +178,19 @@ function eventGate(kind) {
   // skip preview/thumbnail/ad videos (any frame) — duration too short to be the main movie
   if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
-  // CRITICAL: only emit if there was a real user gesture in the last 3 seconds.
-  // This filters out player auto-events (autoplay attempts, auto-resume from 0) so
-  // they don't broadcast as "user pressed play at 0s" and confuse the other side.
-  if (Date.now() - lastUserClickTime > 3000) return false;
+  // CRITICAL: tight user-gesture check. Use navigator.userActivation (the browser's own
+  // user-gesture tracking, active for ~1s after click) + a tight 800ms window on lastUserClickTime.
+  // This filters out player auto-events (autoplay attempts, auto-resume from 0) that fire
+  // within seconds of a user click but aren't actually user-initiated.
+  const hasGesture = (navigator.userActivation && navigator.userActivation.isActive)
+                  || (Date.now() - lastUserClickTime < 800);
+  if (!hasGesture) return false;
 
   // settle window from PAGE LOAD (handles shady site auto-resume)
   if (kind === 'seek' && Date.now() - SCRIPT_LOAD_TIME < 5000) return false;
 
-  // tab-switch suppression
-  if (kind === 'pause' && lastVisibilityChange && Date.now() - lastVisibilityChange < 500) return false;
+  // tab-switch suppression (YouTube debounces visibility events, 2s window covers them)
+  if (kind === 'pause' && lastVisibilityChange && Date.now() - lastVisibilityChange < 2000) return false;
 
   return true;
 }
@@ -364,8 +377,8 @@ setInterval(() => {
   }
 
   // ── DRIFT CHECK — local computation, no network ──────────────────
-  // Compare our position to where we SHOULD be based on the last shared event.
-  // If drifted by more than 3s, quietly correct. Both sides converge to same expected value.
+  // Skip if tab is hidden (background-throttled timers vs video clock produce false drifts)
+  if (document.hidden) return;
   if (lastSharedAction && Date.now() - lastUserActionAt > 5000 && !isSyncing && !autoplayBlocked) {
     let expected = lastSharedTime;
     if (lastSharedAction === 'play') {
@@ -406,21 +419,15 @@ if (IS_TOP) {
   // and restore the overlay state
   setTimeout(() => {
     if (!extContextValid()) return;
-    // distinguish OUR auto-nav (joiner being pulled to host's URL) from user-initiated nav
-    const wasAutoNav = sessionStorage.getItem('dp-auto-nav') === '1';
+    // (we used to auto-disconnect on manual nav, but that punished users for clicking
+    // "next episode" on shady sites which is a full nav. Now we just restore the party
+    // on any navigation — partner is independent and won't be affected.)
     sessionStorage.removeItem('dp-auto-nav');
 
     safeSendMessage({ type: 'is-in-party' }, (res) => {
       if (chrome.runtime?.lastError || !res?.inParty) return;
 
-      if (!wasAutoNav) {
-        // user manually navigated — they're leaving the party. Other person stays in room.
-        // Just disconnect THIS side; the room (and the other person) remains intact.
-        safeSendMessage({ type: 'disconnect' });
-        return;
-      }
-
-      // this was our auto-nav, restore party state
+      // restore party state regardless of whether nav was auto or user-initiated
       inRoom = true;
       isHost = res.isHost === true;
       startKeepalive();
@@ -564,11 +571,15 @@ function handleServerMsg(msg) {
       isHost = false;
       clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
-      if (msg.state) {
+      // skip applying state if server JUST recreated the room (Render restart) — its
+      // default {pause, 0} would wipe both sides back to start. Wait for other side's state-ping.
+      if (msg.state && !msg.recreated) {
         pendingPlayback = { action: msg.state.playing ? 'play' : 'pause', currentTime: msg.state.currentTime };
         lastSharedAction = msg.state.playing ? 'play' : 'pause';
         lastSharedTime = msg.state.currentTime;
         lastSharedAt = Date.now();
+      } else if (msg.recreated) {
+        appendSys('server restarted — keeping current position');
       }
       if (msg.lastUrl && msg.lastUrl !== location.href) {
         sessionStorage.setItem('dp-auto-nav', '1'); // flag: WE initiated this nav, not the user

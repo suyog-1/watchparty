@@ -60,11 +60,11 @@ wss.on('connection', (ws) => {
       case 'join': {
         const id = msg.roomId?.toUpperCase();
         if (!id) { send(ws, { type: 'error', message: 'Room code required.' }); return; }
-        // if room doesn't exist (server restart, or this is a reconnect after Render dropped us)
-        // recreate it on the fly so the party can resume. Reject fresh joins with a different msg.
+        let recreated = false;
         if (!rooms[id]) {
           if (msg.isReconnect) {
             rooms[id] = { members: new Map(), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
+            recreated = true;
           } else {
             send(ws, { type: 'error', message: 'Room not found. Check the code.' });
             return;
@@ -72,7 +72,8 @@ wss.on('connection', (ws) => {
         }
         rooms[id].members.set(ws, { username: msg.username });
         roomId = id;
-        send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state, lastUrl: rooms[id].lastUrl });
+        // include `recreated` flag so client knows server state is empty (don't apply default {pause, 0})
+        send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state, lastUrl: rooms[id].lastUrl, recreated });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
         broadcast(id, { type: 'peer-joined', username: msg.username }, ws);
         break;
@@ -151,6 +152,17 @@ wss.on('connection', (ws) => {
     broadcastAll(roomId, { type: 'peer-left', username });
   });
 });
+
+// Protocol-level WebSocket ping every 25s to keep Render proxy from declaring connections idle.
+// The `ws` library auto-handles pong replies from clients (no JS-level handling needed).
+const pingInterval = setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (ws.readyState === ws.OPEN) {
+      try { ws.ping(); } catch (_) {}
+    }
+  });
+}, 25000);
+wss.on('close', () => clearInterval(pingInterval));
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => console.log(`watchparty running on http://localhost:${PORT}`));
