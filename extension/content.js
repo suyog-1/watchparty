@@ -464,8 +464,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'ws-status':
       startKeepalive();
       showOverlay();
-      if (msg.status === 'connecting') appendSys(msg.attempt > 1 ? `retrying… (${msg.attempt}/3) 🔄` : 'connecting… give it a sec 🔄');
-      if (msg.status === 'retrying')   appendSys(`render is asleep, retrying… (${msg.attempt}/3) 💤`);
+      if (msg.status === 'connecting')   appendSys(msg.attempt > 1 ? `retrying… (${msg.attempt}/3) 🔄` : 'connecting… give it a sec 🔄');
+      if (msg.status === 'retrying')     appendSys(`render is asleep, retrying… (${msg.attempt}/3) 💤`);
+      if (msg.status === 'reconnecting') appendSys(`connection dropped, reconnecting… (${msg.attempt}/6) 🔄`);
       break;
 
     case 'ws-msg':

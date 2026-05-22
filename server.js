@@ -59,7 +59,17 @@ wss.on('connection', (ws) => {
 
       case 'join': {
         const id = msg.roomId?.toUpperCase();
-        if (!rooms[id]) { send(ws, { type: 'error', message: 'Room not found. Check the code.' }); return; }
+        if (!id) { send(ws, { type: 'error', message: 'Room code required.' }); return; }
+        // if room doesn't exist (server restart, or this is a reconnect after Render dropped us)
+        // recreate it on the fly so the party can resume. Reject fresh joins with a different msg.
+        if (!rooms[id]) {
+          if (msg.isReconnect) {
+            rooms[id] = { members: new Map(), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
+          } else {
+            send(ws, { type: 'error', message: 'Room not found. Check the code.' });
+            return;
+          }
+        }
         rooms[id].members.set(ws, { username: msg.username });
         roomId = id;
         send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state, lastUrl: rooms[id].lastUrl });

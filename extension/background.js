@@ -11,6 +11,9 @@ let isHost        = false;    // were we the creator? need to preserve across na
 let videoFrames   = {};       // tabId → frameId holding <video>
 let videoFrameDurations = {}; // tabId → duration of attached video (for picking best frame)
 let keepalivePorts = new Set();
+let lastServerUrl = null;     // remember for auto-reconnect
+let intentionalDisconnect = false; // set true on user-initiated disconnect
+let reconnectAttempts = 0;
 
 // Restore state on service worker startup (handles SW being killed/restarted)
 chrome.storage.session.get(['roomId', 'activeTabId', 'username'], (data) => {
@@ -182,7 +185,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   if (ws) { ws.onclose = null; ws.close(); }
   username = uname;
-  roomId = 'CONNECTING';
+  lastServerUrl = serverUrl;
+  intentionalDisconnect = false;
+  if (roomId !== 'CONNECTING') roomId = 'CONNECTING';
   persistState();
 
   notifyTab({ type: 'ws-status', status: 'connecting', attempt });
@@ -199,9 +204,14 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   }
 
   ws.onopen = () => {
-    const payload = action === 'create'
-      ? { type: 'create', username: uname }
-      : { type: 'join',   username: uname, roomId: rid };
+    let payload;
+    if (action === 'create') {
+      payload = { type: 'create', username: uname };
+    } else {
+      payload = { type: 'join', username: uname, roomId: rid };
+      // if we're reconnecting after drop, tell server to recreate the room if gone
+      if (action === 'reconnect') payload.isReconnect = true;
+    }
     ws.send(JSON.stringify(payload));
   };
 
@@ -211,8 +221,12 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
 
     if (data.type === 'created' || data.type === 'joined') {
       roomId = data.roomId;
-      isHost = (data.type === 'created');
-      // remember initial state from server if joining
+      reconnectAttempts = 0; // success — reset reconnect counter
+      // only change isHost on FRESH connection (action === 'create' for host, 'join' for joiner)
+      // on reconnect we preserve whatever role we already had
+      if (action === 'create' || action === 'join') {
+        isHost = (data.type === 'created');
+      }
       if (data.type === 'joined' && data.state) {
         lastState = {
           action: data.state.playing ? 'play' : 'pause',
@@ -248,13 +262,40 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
 
   ws.onclose = () => {
     const wasConnected = roomId && roomId !== 'CONNECTING';
+    const prevRoomId = roomId;
+    ws = null;
+
+    if (intentionalDisconnect) {
+      roomId = null;
+      persistState();
+      if (wasConnected) {
+        notifyTab({ type: 'ws-closed' });
+        notifyPopup({ type: 'ws-closed' });
+      }
+      return;
+    }
+
+    if (wasConnected && prevRoomId && lastServerUrl) {
+      // unexpected disconnect — auto-reconnect with exponential backoff (max 6 tries)
+      reconnectAttempts++;
+      if (reconnectAttempts <= 6) {
+        const delay = Math.min(2000 * reconnectAttempts, 10000);
+        notifyTab({ type: 'ws-status', status: 'reconnecting', attempt: reconnectAttempts });
+        setTimeout(() => {
+          if (!intentionalDisconnect) {
+            connectWS(lastServerUrl, 'reconnect', prevRoomId, username, 1);
+          }
+        }, delay);
+        return;
+      }
+    }
+
     roomId = null;
     persistState();
     if (wasConnected) {
       notifyTab({ type: 'ws-closed' });
       notifyPopup({ type: 'ws-closed' });
     }
-    ws = null;
   };
 
   ws.onerror = () => {
@@ -271,6 +312,8 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
 }
 
 function disconnectWS() {
+  intentionalDisconnect = true;
+  reconnectAttempts = 0;
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
   roomId = null;
   if (activeTabId) {
