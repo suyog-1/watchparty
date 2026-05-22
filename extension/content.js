@@ -59,6 +59,12 @@ let videoFoundPending = false;
 let videoPollInterval = null;
 let videoInIframeId = null; // (top frame only) frameId of iframe holding the video
 let shadow = null;
+let attachedAt = 0; // timestamp when video was attached — for "settle window" after page nav
+let lastVisibilityChange = 0; // timestamp of last visibilitychange — suppress pause events from tab-switching
+
+document.addEventListener('visibilitychange', () => {
+  lastVisibilityChange = Date.now();
+});
 
 function findVideo() {
   // YouTube-specific: main player has class 'html5-main-video'
@@ -81,16 +87,24 @@ function findVideo() {
 
 function attachVideo(video) {
   if (videoEl === video) {
-    // already attached — but maybe we have pending playback now
     applyPendingPlayback();
     return;
   }
   detachVideo();
   videoEl = video;
+  attachedAt = Date.now(); // start of "settle window" — suppress outbound seeks for 5s
   video.addEventListener('play',   onPlay);
   video.addEventListener('pause',  onPause);
   video.addEventListener('seeked', onSeeked);
-  // tell background about us — include duration so it can pick the best iframe
+  // re-register if duration becomes known later (initial duration is often NaN/0)
+  const onDurChange = () => {
+    if (videoEl === video && isFinite(video.duration) && video.duration > 60) {
+      safeSendMessage({ type: 'register-video-frame', duration: video.duration });
+      video.removeEventListener('durationchange', onDurChange);
+    }
+  };
+  video.addEventListener('durationchange', onDurChange);
+  // initial register
   safeSendMessage({
     type: 'register-video-frame',
     duration: isFinite(video.duration) ? video.duration : 0,
@@ -128,16 +142,28 @@ function detachVideo() {
 }
 
 // Top frame checks inRoom locally; iframes always emit and let background gate
-// (because iframes never receive ws-msg so inRoom would always be false there)
-function onPlay()   { if (eventGate()) emitVideoEvent('play',  videoEl.currentTime); }
-function onPause()  { if (eventGate()) emitVideoEvent('pause', videoEl.currentTime); }
-function onSeeked() { if (eventGate()) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
+function onPlay()   { if (eventGate('play'))  emitVideoEvent('play',  videoEl.currentTime); }
+function onPause()  { if (eventGate('pause')) emitVideoEvent('pause', videoEl.currentTime); }
+function onSeeked() { if (eventGate('seek'))  emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime); }
 
-function eventGate() {
+function eventGate(kind) {
   if (isSyncing) return false;
-  if (IS_TOP) return inRoom; // top frame: only emit when actually in a room
-  // iframe: skip preview/thumbnail videos (short duration). Only the actual movie syncs.
-  if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
+  // if the player is mid-seek (still buffering/settling), suppress — those events are
+  // tail-end of our own seek, not user actions
+  if (videoEl?.seeking) return false;
+
+  if (IS_TOP && !inRoom) return false;
+  // iframes: skip preview/thumbnail videos (short duration)
+  if (!IS_TOP && videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
+
+  // navigation settle window: suppress outbound seeks for 5s after attach.
+  // Stops fight with shady players that auto-resume to "last watched position"
+  if (kind === 'seek' && attachedAt && Date.now() - attachedAt < 5000) return false;
+
+  // tab-switch suppression: ignore pause events within 500ms of a visibility change.
+  // Browser pauses background videos sometimes — don't broadcast those as user pause
+  if (kind === 'pause' && lastVisibilityChange && Date.now() - lastVisibilityChange < 500) return false;
+
   return true;
 }
 
@@ -170,7 +196,7 @@ function applyPlayback(action, currentTime) {
   } else {
     videoEl.pause();
   }
-  setTimeout(() => { isSyncing = false; }, 500);
+  setTimeout(() => { isSyncing = false; }, 1500);
 }
 
 function showAutoplayBanner() {
