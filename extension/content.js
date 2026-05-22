@@ -160,6 +160,8 @@ function eventGate(kind) {
   if (kind === 'seek' && weJustSeeked) return false;
 
   if (IS_TOP && !inRoom) return false;
+  // top frame: if an iframe has the real video, don't broadcast from our (likely thumbnail) video
+  if (IS_TOP && videoInIframeId) return false;
   // iframes: skip preview/thumbnail videos (short duration)
   if (!IS_TOP && videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
@@ -337,6 +339,8 @@ setInterval(() => {
 
   if (IS_TOP) {
     if (!inRoom) return;
+    // if an iframe has the real video, let it broadcast — don't compete from a thumbnail
+    if (videoInIframeId) return;
     wsSend({
       type: isHost ? 'playback' : 'state-ping',
       action, currentTime,

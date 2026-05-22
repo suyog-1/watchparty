@@ -121,15 +121,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
 
     case 'iframe-video-event':
-      // real user action in iframe — always broadcast as playback
-      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
+      // only the "best" iframe (longest duration) is allowed to broadcast — prevents
+      // multiple iframes (movie + preview + ad) from each sending conflicting times
+      if (senderTabId !== undefined && videoFrames[senderTabId] === senderFrameId
+          && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
         ws.send(JSON.stringify({ type: 'playback', action: msg.action, currentTime: msg.currentTime }));
       }
       sendResponse({ ok: true }); break;
 
     case 'iframe-heartbeat':
-      // periodic heartbeat from iframe — host broadcasts as playback, joiner sends state-ping
-      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
+      // same gating: only the best iframe broadcasts heartbeats
+      if (senderTabId !== undefined && videoFrames[senderTabId] === senderFrameId
+          && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
         ws.send(JSON.stringify({
           type: isHost ? 'playback' : 'state-ping',
           action: msg.action,
