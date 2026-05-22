@@ -153,19 +153,23 @@ function detachVideo() {
   videoEl.removeEventListener('pause',  onPause);
   videoEl.removeEventListener('seeked', onSeeked);
   videoEl = null;
+  if (seekDebounceTimer) { clearTimeout(seekDebounceTimer); seekDebounceTimer = null; }
 }
 
 // Top frame checks inRoom locally; iframes always emit and let background gate
-function onPlay()   { if (eventGate('play'))  emitVideoEvent('play',  videoEl.currentTime); }
-function onPause()  { if (eventGate('pause')) emitVideoEvent('pause', videoEl.currentTime); }
+function onPlay()   { if (eventGate('play'))  { lastUserActionAt = Date.now(); emitVideoEvent('play',  videoEl.currentTime); } }
+function onPause()  { if (eventGate('pause')) { lastUserActionAt = Date.now(); emitVideoEvent('pause', videoEl.currentTime); } }
 
-// debounce seeked — players fire 2-4 seeked events for one user scrub (decode, finalize, etc).
-// We only want to emit ONE event per user action, otherwise the receiver's video bounces.
+// debounce seeked — players fire 2-4 seeked events for one user scrub
 let seekDebounceTimer = null;
 function onSeeked() {
   if (!eventGate('seek')) return;
+  // CRITICAL: set lastUserActionAt NOW (not when debounce fires), so partner's in-flight
+  // events during the 400ms window are correctly suppressed
+  lastUserActionAt = Date.now();
   clearTimeout(seekDebounceTimer);
   seekDebounceTimer = setTimeout(() => {
+    seekDebounceTimer = null;
     if (videoEl) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime);
   }, 400);
 }
@@ -178,13 +182,11 @@ function eventGate(kind) {
   // skip preview/thumbnail/ad videos (any frame) — duration too short to be the main movie
   if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
-  // CRITICAL: tight user-gesture check. Use navigator.userActivation (the browser's own
-  // user-gesture tracking, active for ~1s after click) + a tight 800ms window on lastUserClickTime.
-  // This filters out player auto-events (autoplay attempts, auto-resume from 0) that fire
-  // within seconds of a user click but aren't actually user-initiated.
-  const hasGesture = (navigator.userActivation && navigator.userActivation.isActive)
-                  || (Date.now() - lastUserClickTime < 800);
-  if (!hasGesture) return false;
+  // CRITICAL: tight 800ms user-gesture window. The browser's navigator.userActivation
+  // stays active for 5 seconds — too loose. Player auto-resume events fire within that
+  // window and would slip through. We want a tight click→event window: ~800ms covers
+  // real user interactions (click→event is <100ms typically) but blocks player auto-events.
+  if (Date.now() - lastUserClickTime > 800) return false;
 
   // settle window from PAGE LOAD (handles shady site auto-resume)
   if (kind === 'seek' && Date.now() - SCRIPT_LOAD_TIME < 5000) return false;
@@ -212,6 +214,10 @@ function emitVideoEvent(action, currentTime) {
 }
 
 function applyPlayback(action, currentTime) {
+  // cancel any pending seek-debounce — otherwise it'll fire 400ms later with partner's
+  // currentTime (since we just set it here) and echo their position back as ours
+  if (seekDebounceTimer) { clearTimeout(seekDebounceTimer); seekDebounceTimer = null; }
+
   // record the shared timeline anchor whenever we receive a sync event
   lastSharedAction = action;
   lastSharedTime = currentTime;
