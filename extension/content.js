@@ -64,6 +64,7 @@ let lastVisibilityChange = 0; // timestamp of last visibilitychange — suppress
 let weJustSeeked = false; // flag — true briefly after WE programmatically set currentTime
 const SCRIPT_LOAD_TIME = Date.now(); // for settle window (vs attachedAt which can reset)
 let lastUserClickTime = 0; // timestamp of last real user gesture — required for outbound events
+let lastUserActionAt = 0; // timestamp of last user action we EMITTED — suppress in-flight sync from yanking us back
 let autoplayBlocked = false; // true if browser refused our last play() call
 
 // Track real user interaction so we can distinguish user actions from player auto-events
@@ -178,6 +179,7 @@ function eventGate(kind) {
 }
 
 function emitVideoEvent(action, currentTime) {
+  lastUserActionAt = Date.now(); // protect against in-flight host heartbeats yanking us back
   if (IS_TOP) {
     wsSend({ type: 'playback', action, currentTime });
     appendSys(`📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s`);
@@ -431,9 +433,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // playback from background → apply to local video (iframe or main)
   if (msg.type === 'apply-playback') {
+    // ignore incoming syncs for 2.5s after WE took an action — in-flight host heartbeats
+    // would otherwise yank us back to host's old position
+    if (Date.now() - lastUserActionAt < 2500) {
+      sendResponse({ ok: true });
+      return true;
+    }
     const hadVideo = !!videoEl;
     applyPlayback(msg.action, msg.currentTime);
-    // tell top frame so user can see iframe is receiving sync events
     if (!IS_TOP) {
       safeSendMessage({
         type: 'iframe-debug',
@@ -442,7 +449,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           : `iframe got msg but no video yet — re-scanning`,
       });
       if (!hadVideo) {
-        // try to re-find video right now
         const v = findVideo();
         if (v) attachVideo(v);
       }
@@ -565,7 +571,9 @@ function handleServerMsg(msg) {
       break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
     case 'playback': {
-      // detect if this is a real change vs a heartbeat (no actual state change)
+      // suppress in-flight host sync for 2.5s after our own user action
+      if (Date.now() - lastUserActionAt < 2500) break;
+
       const wasPlaying = videoEl ? !videoEl.paused : false;
       const wasTime = videoEl ? videoEl.currentTime : 0;
       const isStateChange = videoEl && (
