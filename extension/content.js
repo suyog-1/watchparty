@@ -198,8 +198,9 @@ function eventGate(kind) {
 }
 
 function emitVideoEvent(action, currentTime) {
-  lastUserActionAt = Date.now();
   // record OUR action as the shared baseline (both sides will then compute drift from same anchor)
+  // Note: lastUserActionAt is already set by the on{Play/Pause/Seeked} handlers at the moment
+  // of the actual user event, not here — keeping this in-flight protection accurate.
   lastSharedAction = action;
   lastSharedTime = currentTime;
   lastSharedAt = Date.now();
