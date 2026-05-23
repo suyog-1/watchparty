@@ -66,15 +66,38 @@ const SCRIPT_LOAD_TIME = Date.now(); // for settle window (vs attachedAt which c
 let lastUserClickTime = 0; // timestamp of last real user gesture — required for outbound events
 let lastUserActionAt = 0; // timestamp of last user action we EMITTED — suppress in-flight sync from yanking us back
 let autoplayBlocked = false; // true if browser refused our last play() call
+let userSeekInProgress = false; // user-initiated seek is buffering — allow the eventual 'seeked' through
 // drift-check state: what we last know about the shared playback
 let lastSharedAction = null;   // 'play' / 'pause' / null
 let lastSharedTime = 0;        // currentTime at the moment of the last shared event
 let lastSharedAt = 0;          // local Date.now() when we received/sent it
 
 // Track real user interaction so we can distinguish user actions from player auto-events
-document.addEventListener('click',    () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
-document.addEventListener('keydown',  () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
-document.addEventListener('touchend', () => { lastUserClickTime = Date.now(); autoplayBlocked = false; }, true);
+document.addEventListener('click',    onUserGesture, true);
+document.addEventListener('keydown',  onUserGesture, true);
+document.addEventListener('touchend', onUserGesture, true);
+
+function onUserGesture(e) {
+  lastUserClickTime = Date.now();
+  autoplayBlocked = false;
+  if (e.type === 'click') detectServerButtonClick(e);
+}
+
+// Detect when host clicks a "server" button on shady streaming sites. Common labels:
+// Server 1/2/3, VidPlay, FileMoon, StreamTape, DoodStream, UpCloud, MixDrop, VidCloud, VidSrc, etc.
+// When detected, notify partner via chat — they can manually click the matching one.
+const SERVER_RE = /^(server\s*\d+|vidplay|filemoon|streamtape|doodstream|upcloud|mixdrop|vidcloud|vidsrc|streamwish|streamhg|playerwish|netu|wolfstream|netulounge|cloudvideo|streamsb|filelions|gomo)/i;
+function detectServerButtonClick(e) {
+  if (!inRoom) return;
+  const el = e.target.closest('button, a, li, span, div[onclick], [role="button"]');
+  if (!el) return;
+  const text = (el.textContent || '').trim().slice(0, 40);
+  if (!text || text.length > 40) return;
+  if (SERVER_RE.test(text)) {
+    // broadcast a chat-level notification (not auto-clicked on partner side — too fragile)
+    wsSend({ type: 'chat', text: `🎬 switched to: ${text}` });
+  }
+}
 
 document.addEventListener('visibilitychange', () => {
   lastVisibilityChange = Date.now();
@@ -107,9 +130,10 @@ function attachVideo(video) {
   detachVideo();
   videoEl = video;
   attachedAt = Date.now(); // start of "settle window" — suppress outbound seeks for 5s
-  video.addEventListener('play',   onPlay);
-  video.addEventListener('pause',  onPause);
-  video.addEventListener('seeked', onSeeked);
+  video.addEventListener('play',    onPlay);
+  video.addEventListener('pause',   onPause);
+  video.addEventListener('seeked',  onSeeked);
+  video.addEventListener('seeking', onSeeking); // fires IMMEDIATELY on seek (before buffer arrives)
   // re-register if duration becomes known later (initial duration is often NaN/0)
   const onDurChange = () => {
     if (videoEl === video && isFinite(video.duration) && video.duration > 60) {
@@ -149,11 +173,22 @@ function applyPendingPlayback() {
 
 function detachVideo() {
   if (!videoEl) return;
-  videoEl.removeEventListener('play',   onPlay);
-  videoEl.removeEventListener('pause',  onPause);
-  videoEl.removeEventListener('seeked', onSeeked);
+  videoEl.removeEventListener('play',    onPlay);
+  videoEl.removeEventListener('pause',   onPause);
+  videoEl.removeEventListener('seeked',  onSeeked);
+  videoEl.removeEventListener('seeking', onSeeking);
   videoEl = null;
   if (seekDebounceTimer) { clearTimeout(seekDebounceTimer); seekDebounceTimer = null; }
+}
+
+// fires the MOMENT a seek is initiated (before buffer arrives). Record user intent
+// here so the eventual 'seeked' (possibly seconds later if buffering) can still pass
+// the eventGate, AND so drift correction doesn't yank us back during the buffer wait.
+function onSeeking() {
+  if (Date.now() - lastUserClickTime < 800) {
+    userSeekInProgress = true;
+    lastUserActionAt = Date.now();
+  }
 }
 
 // Top frame checks inRoom locally; iframes always emit and let background gate
@@ -182,10 +217,15 @@ function eventGate(kind) {
   // skip preview/thumbnail/ad videos (any frame) — duration too short to be the main movie
   if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
 
-  // CRITICAL: tight 800ms user-gesture window. The browser's navigator.userActivation
-  // stays active for 5 seconds — too loose. Player auto-resume events fire within that
-  // window and would slip through. We want a tight click→event window: ~800ms covers
-  // real user interactions (click→event is <100ms typically) but blocks player auto-events.
+  // If the user just started a seek (seeking event fired within click window) and the
+  // eventual seeked is arriving (possibly seconds later due to buffering) — pass it through.
+  if (kind === 'seek' && userSeekInProgress) {
+    userSeekInProgress = false;
+    return true;
+  }
+
+  // Tight 800ms user-gesture window. Player auto-events fire within seconds of a click
+  // (player loads, resumes from last position, etc.) — those need to be filtered out.
   if (Date.now() - lastUserClickTime > 800) return false;
 
   // settle window from PAGE LOAD (handles shady site auto-resume)
@@ -386,6 +426,8 @@ setInterval(() => {
   // ── DRIFT CHECK — local computation, no network ──────────────────
   // Skip if tab is hidden (background-throttled timers vs video clock produce false drifts)
   if (document.hidden) return;
+  // Skip if video is actively buffering or mid-seek — don't second-guess the player
+  if (videoEl.seeking || videoEl.readyState < 3) return;
   if (lastSharedAction && Date.now() - lastUserActionAt > 5000 && !isSyncing && !autoplayBlocked) {
     let expected = lastSharedTime;
     if (lastSharedAction === 'play') {
