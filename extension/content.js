@@ -248,6 +248,7 @@ function emitVideoEvent(action, currentTime) {
   if (IS_TOP) {
     wsSend({ type: 'playback', action, currentTime });
     appendSys(`📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s`);
+    setStatus('ok', `→sent: ${action} @ ${currentTime.toFixed(0)}s`);
   } else {
     safeSendMessage({ type: 'iframe-video-event', action, currentTime });
     safeSendMessage({ type: 'iframe-debug', text: `📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s` });
@@ -518,12 +519,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // playback from background → apply to local video (iframe or main)
   if (msg.type === 'apply-playback') {
-    // ignore incoming syncs for 2.5s after WE took an action — in-flight host heartbeats
-    // would otherwise yank us back to host's old position
-    if (Date.now() - lastUserActionAt < 2500) {
+    // ignore incoming syncs for 1.5s after WE took an action — in-flight partner events
+    // would otherwise yank us back. 1.5s is a compromise: long enough to cover the round-trip
+    // back from server, short enough that a real subsequent partner action isn't suppressed.
+    if (Date.now() - lastUserActionAt < 1500) {
+      console.log('[daddys party] iframe apply-playback SUPPRESSED — recent user action');
       sendResponse({ ok: true });
       return true;
     }
+    console.log('[daddys party] iframe apply-playback', msg.action, '@', msg.currentTime?.toFixed(1));
     const hadVideo = !!videoEl;
     applyPlayback(msg.action, msg.currentTime);
     if (!IS_TOP) {
@@ -545,6 +549,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // iframe debug message — relayed to top frame for display
   if (msg.type === 'iframe-debug') {
     if (IS_TOP) appendSys(msg.text);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // top frame asked iframe to push its current playback state (force-resync button)
+  if (msg.type === 'force-emit-state' && !IS_TOP) {
+    if (videoEl) {
+      lastUserActionAt = Date.now();
+      safeSendMessage({
+        type: 'iframe-video-event',
+        action: videoEl.paused ? 'pause' : 'play',
+        currentTime: videoEl.currentTime,
+      });
+      safeSendMessage({
+        type: 'iframe-debug',
+        text: `🔧 forced push from iframe: ${videoEl.paused ? 'pause' : 'play'} @ ${videoEl.currentTime.toFixed(0)}s`,
+      });
+    }
     sendResponse({ ok: true });
     return true;
   }
@@ -571,6 +593,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case 'ws-closed':
       inRoom = false;
+      setStatus('bad', 'disconnected — reopen extension');
       appendSys('disconnected 😭 open the extension to rejoin');
       break;
 
@@ -610,6 +633,7 @@ function handleServerMsg(msg) {
       isHost = true; // we created the room — we're the sync authority
       clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
+      setStatus('ok', 'connected — host');
       appendSys("you're in! 🎉 you're the HOST");
       wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
@@ -620,6 +644,7 @@ function handleServerMsg(msg) {
       isHost = false;
       clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
+      setStatus('ok', 'connected — joiner');
       // skip applying state if server JUST recreated the room (Render restart) — its
       // default {pause, 0} would wipe both sides back to start. Wait for other side's state-ping.
       if (msg.state && !msg.recreated) {
@@ -663,9 +688,15 @@ function handleServerMsg(msg) {
       break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
     case 'playback': {
-      // suppress in-flight host sync for 2.5s after our own user action
-      if (Date.now() - lastUserActionAt < 2500) break;
+      // suppress in-flight partner sync for 1.5s after our own user action (was 2.5s, too aggressive)
+      if (Date.now() - lastUserActionAt < 1500) {
+        console.log('[daddys party] playback from', msg.from, 'SUPPRESSED — recent user action');
+        appendSys(`(skipped ${msg.from}'s sync — your action wins)`);
+        break;
+      }
 
+      console.log('[daddys party] applying playback from', msg.from, msg.action, '@', msg.currentTime?.toFixed(1));
+      setStatus('ok', `←sync from ${msg.from}: ${msg.action} @ ${msg.currentTime.toFixed(0)}s`);
       const wasPlaying = videoEl ? !videoEl.paused : false;
       const wasTime = videoEl ? videoEl.currentTime : 0;
       const isStateChange = videoEl && (
@@ -675,6 +706,8 @@ function handleServerMsg(msg) {
       applyPlayback(msg.action, msg.currentTime);
       if (isStateChange || !videoEl) {
         appendSys(`${msg.from} ${msg.action === 'play' ? pick(PLAY_MSGS) : pick(PAUSE_MSGS)}`);
+      } else {
+        appendSys(`✓ in sync with ${msg.from} @ ${msg.currentTime.toFixed(0)}s`);
       }
       break;
     }
@@ -808,6 +841,16 @@ const OVERLAY_CSS = `
   .m.s  .txt{color:#7755aa;font-style:italic}
   .m .gimg{max-width:100%;border-radius:8px;margin-top:3px}
 
+  #status-row{display:flex;align-items:center;gap:6px;padding:6px 12px;border-top:1px solid #ffffff08;flex-shrink:0;font-size:.68rem;color:#9969cc}
+  #status-row .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#888}
+  #status-row.ok .dot{background:#4ade80}
+  #status-row.bad .dot{background:#ef4444}
+  #resync-btn{
+    margin-left:auto;background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
+    color:#bf5af2;font-size:.68rem;font-weight:700;padding:3px 8px;cursor:pointer;
+  }
+  #resync-btn:hover{background:#3d0080}
+
   #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0}
   .rb{
     background:none;border:1px solid #ffffff15;border-radius:7px;
@@ -884,6 +927,11 @@ function buildOverlay() {
       </div>
       <div id="body">
         <div id="log"></div>
+        <div id="status-row">
+          <span class="dot"></span>
+          <span id="status-text">checking…</span>
+          <button id="resync-btn" title="push your current playback position to your partner">🔧 push sync</button>
+        </div>
         <div id="rxns">
           <button class="rb" data-e="❤️">❤️</button>
           <button class="rb" data-e="😂">😂</button>
@@ -935,6 +983,32 @@ function wireOverlay() {
       el.textContent = 'copied 📋';
       setTimeout(() => { el.textContent = code; }, 1400);
     });
+  };
+
+  // FORCE PUSH SYNC — emits current playback state immediately, bypassing the gesture gate.
+  // Use when sync is stuck/glitchy and you want to force your partner to your current position.
+  shadow.getElementById('resync-btn').onclick = () => {
+    if (!videoEl) {
+      // try to find one in the iframe via background routing
+      const v = findVideo();
+      if (v) attachVideo(v);
+    }
+    if (videoEl) {
+      lastUserActionAt = Date.now(); // protect against partner echo for 1.5s
+      const payload = {
+        type: 'playback',
+        action: videoEl.paused ? 'pause' : 'play',
+        currentTime: videoEl.currentTime,
+      };
+      if (IS_TOP) wsSend(payload);
+      else safeSendMessage({ type: 'iframe-video-event', action: payload.action, currentTime: payload.currentTime });
+      appendSys(`🔧 forced push: ${payload.action} @ ${payload.currentTime.toFixed(0)}s`);
+    } else {
+      // top frame has no videoEl — ask any iframe with video to push
+      appendSys('🔧 push requested — checking iframes…');
+      // background can route to the registered video frame
+      safeSendMessage({ type: 'request-iframe-push' });
+    }
   };
 
   shadow.querySelectorAll('.rb').forEach(b => {
@@ -1068,6 +1142,19 @@ function overlaySetRoom(id) {
 function overlaySetMembers(m) {
   if (!shadow) return;
   shadow.getElementById('who').textContent = m.join(' & ');
+}
+
+// Update the connection-status indicator at the bottom of the overlay.
+// Called on ws-status, ws-msg arrivals, etc.
+function setStatus(state, text) {
+  if (!shadow) return;
+  const row = shadow.getElementById('status-row');
+  const txt = shadow.getElementById('status-text');
+  if (!row || !txt) return;
+  row.classList.remove('ok', 'bad');
+  if (state === 'ok')  row.classList.add('ok');
+  if (state === 'bad') row.classList.add('bad');
+  txt.textContent = text;
 }
 
 function appendChat(who, text) { if (shadow) append(false, who, text); }

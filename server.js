@@ -52,6 +52,7 @@ wss.on('connection', (ws) => {
         const id = makeId();
         rooms[id] = { members: new Map([[ws, { username: msg.username }]]), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
         roomId = id;
+        console.log(`[room ${id}] CREATE by ${msg.username}`);
         send(ws, { type: 'created', roomId: id });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
         break;
@@ -65,13 +66,16 @@ wss.on('connection', (ws) => {
           if (msg.isReconnect) {
             rooms[id] = { members: new Map(), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
             recreated = true;
+            console.log(`[room ${id}] RECREATE on reconnect by ${msg.username}`);
           } else {
+            console.log(`[room ${id}] JOIN FAILED — room not found, requested by ${msg.username}`);
             send(ws, { type: 'error', message: 'Room not found. Check the code.' });
             return;
           }
         }
         rooms[id].members.set(ws, { username: msg.username });
         roomId = id;
+        console.log(`[room ${id}] JOIN by ${msg.username} → ${rooms[id].members.size} members`);
         // include `recreated` flag so client knows server state is empty (don't apply default {pause, 0})
         send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state, lastUrl: rooms[id].lastUrl, recreated });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
@@ -88,9 +92,14 @@ wss.on('connection', (ws) => {
       }
 
       case 'playback': {
-        if (!roomId || !rooms[roomId]) return;
+        if (!roomId || !rooms[roomId]) {
+          console.warn(`[playback] DROPPED — sender not in any room (msg=${JSON.stringify(msg)})`);
+          return;
+        }
         rooms[roomId].state = { playing: msg.action === 'play', currentTime: msg.currentTime };
         const from = rooms[roomId].members.get(ws)?.username || 'someone';
+        const recipientCount = rooms[roomId].members.size - 1;
+        console.log(`[room ${roomId}] PLAYBACK ${msg.action} @ ${msg.currentTime?.toFixed(1)}s from ${from} → ${recipientCount} others`);
         broadcast(roomId, { type: 'playback', action: msg.action, currentTime: msg.currentTime, from }, ws);
         break;
       }

@@ -95,7 +95,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // content script → background → WebSocket
     case 'ws-send':
       if (ws?.readyState === WebSocket.OPEN) {
+        if (msg.payload?.type === 'playback') {
+          console.log('[daddys party] →SEND playback', msg.payload.action, '@', msg.payload.currentTime?.toFixed(1));
+        }
         ws.send(JSON.stringify(msg.payload));
+      } else {
+        console.warn('[daddys party] ws-send dropped — ws state:', ws?.readyState, 'payload:', msg.payload?.type);
       }
       sendResponse({ ok: true }); break;
 
@@ -124,23 +129,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
 
     case 'iframe-video-event':
-      // only the "best" iframe (longest duration) is allowed to broadcast — prevents
-      // multiple iframes (movie + preview + ad) from each sending conflicting times
-      if (senderTabId !== undefined && videoFrames[senderTabId] === senderFrameId
-          && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
-        ws.send(JSON.stringify({ type: 'playback', action: msg.action, currentTime: msg.currentTime }));
+      // auto-register iframe on first emit if not yet registered (fixes silent-drop bug
+      // when an iframe fires a play/pause/seek BEFORE its register-video-frame is processed)
+      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
+        if (videoFrames[senderTabId] === undefined) {
+          videoFrames[senderTabId] = senderFrameId;
+          videoFrameDurations[senderTabId] = 1; // marker — real duration arrives on register
+          if (senderFrameId !== 0) {
+            chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
+          }
+          console.log('[daddys party] auto-registered iframe on first event:', senderFrameId);
+        }
+        if (videoFrames[senderTabId] === senderFrameId) {
+          console.log('[daddys party] →SEND playback', msg.action, '@', msg.currentTime?.toFixed(1));
+          ws.send(JSON.stringify({ type: 'playback', action: msg.action, currentTime: msg.currentTime }));
+        } else {
+          console.log('[daddys party] DROPPED iframe-video-event from non-winning iframe', senderFrameId, 'winner is', videoFrames[senderTabId]);
+        }
       }
       sendResponse({ ok: true }); break;
 
     case 'iframe-heartbeat':
       // silent state-ping only (no host/joiner asymmetry — sync is event-driven now)
-      if (senderTabId !== undefined && videoFrames[senderTabId] === senderFrameId
-          && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
-        ws.send(JSON.stringify({
-          type: 'state-ping',
-          action: msg.action,
-          currentTime: msg.currentTime,
-        }));
+      // Auto-register iframe on first heartbeat too — same race fix as above
+      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
+        if (videoFrames[senderTabId] === undefined) {
+          videoFrames[senderTabId] = senderFrameId;
+          videoFrameDurations[senderTabId] = 1;
+          if (senderFrameId !== 0) {
+            chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
+          }
+        }
+        if (videoFrames[senderTabId] === senderFrameId) {
+          ws.send(JSON.stringify({
+            type: 'state-ping',
+            action: msg.action,
+            currentTime: msg.currentTime,
+          }));
+        }
       }
       sendResponse({ ok: true }); break;
 
@@ -167,6 +193,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const vfid = videoFrames[senderTabId];
       if (vfid !== undefined && vfid !== 0) {
         chrome.tabs.sendMessage(senderTabId, { type: 'apply-playback', action: msg.action, currentTime: msg.currentTime }, { frameId: vfid }).catch(() => {});
+      }
+      sendResponse({ ok: true }); break;
+    }
+
+    case 'request-iframe-push': {
+      // Top frame's force-push button was clicked but top has no video — ask the
+      // registered iframe to emit its current state instead
+      const vfid = videoFrames[senderTabId];
+      if (vfid !== undefined && vfid !== 0) {
+        chrome.tabs.sendMessage(senderTabId, { type: 'force-emit-state' }, { frameId: vfid }).catch(() => {});
       }
       sendResponse({ ok: true }); break;
     }
@@ -218,6 +254,13 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   ws.onmessage = (e) => {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
+
+    // Log all incoming server messages (except heartbeats) for easy debugging
+    if (data.type === 'playback') {
+      console.log('[daddys party] ←RECV playback from', data.from, data.action, '@', data.currentTime?.toFixed(1));
+    } else if (data.type !== 'state-ping' && data.type !== 'ping') {
+      console.log('[daddys party] ←RECV', data.type, data.from || data.username || '');
+    }
 
     if (data.type === 'created' || data.type === 'joined') {
       roomId = data.roomId;
