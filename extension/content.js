@@ -298,6 +298,36 @@ function applyPlayback(action, currentTime) {
   setTimeout(() => { isSyncing = false; }, 1500);
 }
 
+// Big floating banner shown when a newer extension version exists on GitHub.
+// Click → opens releases page with full install instructions.
+function showUpdateBanner(newVersion, currentVersion, url) {
+  if (document.getElementById('__dp_update_banner__')) return;
+  const banner = document.createElement('div');
+  banner.id = '__dp_update_banner__';
+  banner.style.cssText = [
+    'position:fixed','top:16px','left:50%','transform:translateX(-50%)',
+    'z-index:2147483647','background:linear-gradient(135deg,#ff2d78,#a855f7)',
+    'color:#fff','padding:14px 22px','border-radius:14px',
+    'font-family:system-ui,sans-serif','font-size:.95rem','font-weight:700',
+    'box-shadow:0 8px 30px #000a','cursor:pointer','text-align:center',
+    'max-width:90vw','display:flex','flex-direction:column','gap:6px','align-items:center',
+  ].join(';');
+  banner.innerHTML =
+    `🎁 new version <strong>v${newVersion}</strong> available (you're on v${currentVersion})` +
+    `<span style="font-size:.78rem;font-weight:400;opacity:.95">click to download → extract → hit 🔄 in chrome://extensions</span>` +
+    `<span style="font-size:.65rem;opacity:.7;margin-top:2px">(or click ✕ to dismiss until next check)</span>`;
+  const closeBtn = document.createElement('span');
+  closeBtn.textContent = '✕';
+  closeBtn.style.cssText = 'position:absolute;top:6px;right:10px;font-size:1rem;font-weight:700;opacity:.7';
+  closeBtn.onclick = (e) => { e.stopPropagation(); banner.remove(); };
+  banner.appendChild(closeBtn);
+  banner.onclick = () => {
+    window.open(url, '_blank');
+    banner.remove();
+  };
+  (document.fullscreenElement || document.body || document.documentElement).appendChild(banner);
+}
+
 function showAutoplayBanner() {
   if (document.getElementById('__dp_autoplay_banner__')) return;
   const banner = document.createElement('div');
@@ -549,6 +579,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // iframe debug message — relayed to top frame for display
   if (msg.type === 'iframe-debug') {
     if (IS_TOP) appendSys(msg.text);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  // background detected a new release on GitHub
+  if (msg.type === 'update-available' && IS_TOP) {
+    showUpdateBanner(msg.version, msg.currentVersion, msg.url);
     sendResponse({ ok: true });
     return true;
   }
@@ -970,6 +1007,14 @@ function buildOverlay() {
   } else {
     appendSys('no video on this page yet — waiting…');
   }
+
+  // ask background if there's a pending update we should banner about
+  safeSendMessage({ type: 'get-update-status' }, (res) => {
+    if (res?.updateAvailable) {
+      const u = res.updateAvailable;
+      showUpdateBanner(u.version, u.currentVersion, 'https://github.com/suyog-1/watchparty/releases/latest');
+    }
+  });
 }
 
 function wireOverlay() {

@@ -29,6 +29,20 @@ chrome.storage.sync.get(['username'], d => {
   if (d.username) usernameInput.value = d.username;
 });
 
+// ── UPDATE CHECK ──────────────────────────────────────────────────────────────
+// Show a "new version available" banner if background detected one.
+// Also kicks off a fresh check in case it's been a while since the last poll.
+chrome.runtime.sendMessage({ type: 'check-update-now' }, (res) => {
+  if (chrome.runtime.lastError || !res?.updateAvailable) return;
+  const u = res.updateAvailable;
+  const banner = document.getElementById('update-banner');
+  const text = document.getElementById('update-version-text');
+  if (banner && text) {
+    text.textContent = `v${u.version} (you're on v${u.currentVersion})`;
+    banner.classList.remove('hidden');
+  }
+});
+
 chrome.runtime.sendMessage({ type: 'get-state' }, (state) => {
   if (!state) return;
 

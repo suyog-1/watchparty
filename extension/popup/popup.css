@@ -27,6 +27,22 @@ body {
 
 .hidden { display: none !important; }
 
+#update-banner {
+  display: block;
+  background: linear-gradient(135deg, var(--pink), var(--purple));
+  color: #fff;
+  text-decoration: none;
+  padding: 9px 12px;
+  border-radius: 9px;
+  font-size: .82rem;
+  text-align: center;
+  font-weight: 600;
+  box-shadow: 0 4px 14px #ff2d7840;
+  margin-bottom: 4px;
+}
+#update-banner:hover { transform: scale(1.02); transition: transform .15s; }
+#update-banner strong { font-weight: 800; }
+
 .brand { text-align: center; display: flex; flex-direction: column; gap: 4px; }
 .brand h1 {
   font-family: 'Bangers', Impact, sans-serif;

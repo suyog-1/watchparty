@@ -47,14 +47,83 @@ chrome.runtime.onConnect.addListener(port => {
 // HEARTBEAT: alarm fires every 25 seconds (just under Chrome's 30s idle kill)
 // to prevent service worker termination while WebSocket is alive
 chrome.alarms.create('dp-heartbeat', { periodInMinutes: 0.42 });
+// UPDATE CHECK: poll GitHub releases every 4 hours for a newer version
+chrome.alarms.create('dp-update-check', { delayInMinutes: 1, periodInMinutes: 240 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'dp-heartbeat') {
-    // also send a ping over WS to keep proxy connections warm
     if (ws?.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify({ type: 'ping' })); } catch (_) {}
     }
   }
+  if (alarm.name === 'dp-update-check') {
+    checkForUpdates();
+  }
 });
+
+// ── AUTO-UPDATE CHECKER ──────────────────────────────────────────────────────
+// Chrome blocks true silent auto-update for sideloaded extensions (security policy).
+// Best we can do without Chrome Web Store: poll GitHub releases, notify the user
+// the moment a new version is out, make the install path as smooth as possible.
+
+const RELEASES_API = 'https://api.github.com/repos/suyog-1/watchparty/releases/latest';
+const RELEASES_PAGE = 'https://github.com/suyog-1/watchparty/releases/latest';
+
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+async function checkForUpdates() {
+  try {
+    const res = await fetch(RELEASES_API, { cache: 'no-store' });
+    if (!res.ok) {
+      console.warn('[daddys party] update check: GitHub returned', res.status);
+      return;
+    }
+    const data = await res.json();
+    const tag = data.tag_name || data.name || '';
+    // tag is 'latest' (a fixed tag) — pull version from the release name instead
+    const versionMatch = (data.name || '').match(/v?(\d+\.\d+\.\d+)/);
+    const latestVersion = versionMatch ? versionMatch[1] : null;
+    if (!latestVersion) {
+      console.warn('[daddys party] update check: could not parse version from release', data.name);
+      return;
+    }
+    const currentVersion = chrome.runtime.getManifest().version;
+    const cmp = compareVersions(latestVersion, currentVersion);
+    console.log(`[daddys party] update check: latest=${latestVersion} current=${currentVersion} cmp=${cmp}`);
+
+    if (cmp > 0) {
+      // newer version exists — store flag, notify active tab, fire system notification
+      await chrome.storage.local.set({
+        updateAvailable: { version: latestVersion, currentVersion, checkedAt: Date.now() },
+      });
+      if (activeTabId) {
+        chrome.tabs.sendMessage(activeTabId, {
+          type: 'update-available',
+          version: latestVersion,
+          currentVersion,
+          url: RELEASES_PAGE,
+        }).catch(() => {});
+      }
+      // (system notification omitted — needs an icon file we don't bundle.
+      // The in-extension banner in overlay + popup is the user-facing surface.)
+    } else {
+      // we're up to date — clear any stale flag
+      await chrome.storage.local.remove('updateAvailable');
+    }
+  } catch (e) {
+    console.warn('[daddys party] update check failed:', e.message);
+  }
+}
+
+// fire one update check on service worker boot (covers the case where SW just started)
+checkForUpdates();
 
 // ── MESSAGE ROUTING ──────────────────────────────────────────────────────────
 
@@ -211,6 +280,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case 'focus-tab':
       if (msg.tabId) chrome.tabs.update(msg.tabId, { active: true }).catch(() => {});
       sendResponse({ ok: true }); break;
+
+    case 'check-update-now':
+      // popup triggered a manual check
+      checkForUpdates().then(() => {
+        chrome.storage.local.get(['updateAvailable'], d => sendResponse({ updateAvailable: d.updateAvailable || null }));
+      });
+      return true; // async
+
+    case 'get-update-status':
+      chrome.storage.local.get(['updateAvailable'], d => sendResponse({ updateAvailable: d.updateAvailable || null }));
+      return true; // async
   }
 
   return true; // keep channel open for async sendResponse
