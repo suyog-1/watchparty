@@ -1,0 +1,72 @@
+name: release-extension
+
+# Auto-builds the extension folder into a zip on every push to main and
+# attaches it to a GitHub Release tagged "latest" — so non-technical users
+# (your girl) can always grab the freshest build from one stable URL:
+#
+#   https://github.com/suyog-1/watchparty/releases/latest
+#
+# She downloads the zip, extracts it over her existing folder, then opens
+# chrome://extensions and hits the 🔄 reload icon. No git, no commands.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extension/**'
+      - '.github/workflows/release-extension.yml'
+  workflow_dispatch: # also lets you trigger manually from the Actions tab
+
+permissions:
+  contents: write # needed to create/update releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Read extension version
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./extension/manifest.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extension version: $VERSION"
+
+      - name: Build extension zip
+        run: |
+          cd extension
+          zip -r ../daddys-party-extension.zip . -x "*.DS_Store" "*.git*"
+          cd ..
+          ls -lh daddys-party-extension.zip
+
+      - name: Delete old "latest" release (if exists)
+        run: |
+          gh release delete latest --yes || true
+          git push --delete origin latest || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create fresh "latest" release with zip attached
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Latest build (v${{ steps.ver.outputs.version }})"
+          body: |
+            **Latest auto-built extension** — version `${{ steps.ver.outputs.version }}`
+
+            ## How to install (for non-technical users):
+
+            1. Download `daddys-party-extension.zip` below
+            2. Extract it (right-click → "Extract All...")
+            3. Open Chrome/Brave/Edge → go to `chrome://extensions`
+            4. Turn on "Developer mode" (toggle, top-right)
+            5. If you've installed before: click the 🔄 reload icon on the existing "daddy's party" card
+            6. If first time: click "Load unpacked" → pick the extracted folder
+
+            Refresh any tabs where you want to use the extension after reloading.
+          files: daddys-party-extension.zip
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.env
+.DS_Store
+
+# built extension zips — generated locally + by GH Actions, never commit
+daddys-party-extension.zip
+extension.zip

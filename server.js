@@ -50,9 +50,9 @@ wss.on('connection', (ws) => {
 
       case 'create': {
         const id = makeId();
-        rooms[id] = { members: new Map([[ws, { username: msg.username }]]), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
+        rooms[id] = { members: new Map([[ws, { username: msg.username, version: msg.version || '?' }]]), state: { playing: false, currentTime: 0 }, video: null, lastUrl: null };
         roomId = id;
-        console.log(`[room ${id}] CREATE by ${msg.username}`);
+        console.log(`[room ${id}] CREATE by ${msg.username} (v${msg.version || '?'})`);
         send(ws, { type: 'created', roomId: id });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
         break;
@@ -73,10 +73,20 @@ wss.on('connection', (ws) => {
             return;
           }
         }
-        rooms[id].members.set(ws, { username: msg.username });
+        rooms[id].members.set(ws, { username: msg.username, version: msg.version || '?' });
         roomId = id;
-        console.log(`[room ${id}] JOIN by ${msg.username} → ${rooms[id].members.size} members`);
-        // include `recreated` flag so client knows server state is empty (don't apply default {pause, 0})
+        console.log(`[room ${id}] JOIN by ${msg.username} (v${msg.version || '?'}) → ${rooms[id].members.size} members`);
+
+        // detect version mismatch and warn everyone — older clients miss sync fixes
+        const versions = [...rooms[id].members.values()].map(m => m.version);
+        const uniqueVersions = [...new Set(versions)];
+        if (uniqueVersions.length > 1) {
+          console.log(`[room ${id}] ⚠️ VERSION MISMATCH: ${versions.join(' vs ')}`);
+          const versionList = [...rooms[id].members.values()]
+            .map(m => `${m.username}: v${m.version}`).join(', ');
+          broadcastAll(id, { type: 'version-mismatch', versions: versionList });
+        }
+
         send(ws, { type: 'joined', roomId: id, video: rooms[id].video, state: rooms[id].state, lastUrl: rooms[id].lastUrl, recreated });
         broadcastAll(id, { type: 'members', members: memberNames(id) });
         broadcast(id, { type: 'peer-joined', username: msg.username }, ws);

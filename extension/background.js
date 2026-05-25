@@ -240,12 +240,12 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
   }
 
   ws.onopen = () => {
+    const myVersion = chrome.runtime.getManifest().version;
     let payload;
     if (action === 'create') {
-      payload = { type: 'create', username: uname };
+      payload = { type: 'create', username: uname, version: myVersion };
     } else {
-      payload = { type: 'join', username: uname, roomId: rid };
-      // if we're reconnecting after drop, tell server to recreate the room if gone
+      payload = { type: 'join', username: uname, roomId: rid, version: myVersion };
       if (action === 'reconnect') payload.isReconnect = true;
     }
     ws.send(JSON.stringify(payload));

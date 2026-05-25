@@ -687,6 +687,13 @@ function handleServerMsg(msg) {
       }
       break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
+    case 'version-mismatch':
+      // big visible warning — outdated client = broken sync
+      appendSys(`⚠️ VERSION MISMATCH — ${msg.versions}`);
+      appendSys(`⚠️ older side won't have latest sync fixes! update at:`);
+      appendSys(`github.com/suyog-1/watchparty/releases/latest`);
+      setStatus('bad', '⚠ version mismatch — sync may break');
+      break;
     case 'playback': {
       // suppress in-flight partner sync for 1.5s after our own user action (was 2.5s, too aggressive)
       if (Date.now() - lastUserActionAt < 1500) {
@@ -918,7 +925,7 @@ function buildOverlay() {
     <div id="panel">
       <div id="bar">
         <div id="bar-left">
-          <span id="title">daddy's party 🎬</span>
+          <span id="title">daddy's party 🎬 <span style="font-size:.6rem;color:#664488;font-weight:400">v${(chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '?'}</span></span>
           <span id="who">—</span>
         </div>
         <span id="code-chip">—</span>
