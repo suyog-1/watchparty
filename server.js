@@ -190,8 +190,11 @@ wss.on('connection', (ws) => {
       case 'jumpscare': {
         if (!roomId || !rooms[roomId]) return;
         const username = rooms[roomId].members.get(ws)?.username || 'someone';
-        // scare the OTHER person, not yourself
-        broadcast(roomId, { type: 'jumpscare', username }, ws);
+        // forward imageUrl (data URL of custom scare image, if uploaded). Cap size at ~250KB
+        // to prevent abuse — already enforced client-side but defense in depth.
+        let imageUrl = msg.imageUrl;
+        if (typeof imageUrl !== 'string' || imageUrl.length > 250_000) imageUrl = undefined;
+        broadcast(roomId, { type: 'jumpscare', username, imageUrl }, ws);
         break;
       }
 

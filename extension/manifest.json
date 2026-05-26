@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "daddy's party 🎬",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "watch movies w ur person, in sync, on literally any site 🎬",
   "permissions": ["activeTab", "scripting", "storage", "tabs", "webNavigation", "alarms"],
   "host_permissions": ["<all_urls>"],

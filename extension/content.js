@@ -54,6 +54,8 @@ let videoMutObs = null;
 let inRoom      = false;
 let isHost      = false; // true if we created the room
 let pendingPlayback = null; // queued playback event waiting for videoEl
+let countdownUsed = false; // one-shot per party — host only, hides after use
+let memberCount = 0; // current room member count (from server 'members' message)
 let videoFoundPending = false;
 let videoPollInterval = null;
 let videoInIframeId = null; // (top frame only) frameId of iframe holding the video
@@ -685,10 +687,13 @@ function handleServerMsg(msg) {
     case 'created':
       inRoom = true;
       isHost = true; // we created the room — we're the sync authority
+      countdownUsed = false; // fresh party, one countdown available again
+      memberCount = 1; // just us so far
       clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
       setStatus('ok', 'connected — host');
       appendSys("you're in! 🎉 you're the HOST");
+      updateCountdownButtonVisibility();
       wsSend({ type: 'url-change', url: location.href });
       attachVideoOrPoll();
       break;
@@ -696,9 +701,12 @@ function handleServerMsg(msg) {
     case 'joined':
       inRoom = true;
       isHost = false;
+      countdownUsed = false; // tracked even though joiners can't trigger it
+      memberCount = (msg.members?.length) || 2; // we joined so at least 2
       clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
       setStatus('ok', 'connected — joiner');
+      updateCountdownButtonVisibility(); // joiner: never visible (not host)
       if (msg.state && !msg.recreated) {
         pendingPlayback = {
           eventType: msg.state.playing ? 'play' : 'pause',
@@ -723,6 +731,8 @@ function handleServerMsg(msg) {
       break;
     case 'members':
       overlaySetMembers(msg.members);
+      memberCount = msg.members?.length || 0;
+      updateCountdownButtonVisibility(); // becomes visible the moment partner joins
       break;
     case 'peer-joined':
       appendSys(`${msg.username} ${pick(JOIN_MSGS)}`);
@@ -803,7 +813,7 @@ function handleServerMsg(msg) {
     case 'chat':       appendChat(msg.username, msg.text); break;
     case 'gif':        appendGif(msg.username, msg.url);  break;
     case 'reaction':   popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
-    case 'jumpscare':  doJumpscare(msg.username); break;
+    case 'jumpscare':  doJumpscare(msg.username, msg.imageUrl); break;
     case 'url-change':
       // just notify — don't auto-navigate. If user wants to follow, they navigate manually.
       // (manual nav will trigger the "user left party" flow which is what we want)
@@ -817,7 +827,7 @@ function handleServerMsg(msg) {
 
 // ── JUMPSCARE ─────────────────────────────────────────────────────────────────
 
-// pool of scare effects — each one different
+// pool of default scare effects — used when user has no custom images uploaded
 const SCARE_EFFECTS = [
   { color: '#ff0000', emoji: '😱', anim: 'flash' },
   { color: '#000000', emoji: '👻', anim: 'flash' },
@@ -827,7 +837,51 @@ const SCARE_EFFECTS = [
   { color: '#ffffff', emoji: '😈', anim: 'flash' },
 ];
 
-function doJumpscare(from) {
+// Anti-spam cooldown (per local user) — 30s between scares
+const SCARE_COOLDOWN_MS = 30000;
+let lastScareAt = 0;
+
+// User's custom scare images, loaded from chrome.storage.local on overlay init.
+// Each item is a small (max 400px, JPEG q70) data URL — ~10-40KB each.
+let customScareImages = [];
+
+function loadCustomScareImages() {
+  try {
+    chrome.storage.local.get(['scareImages'], (d) => {
+      customScareImages = Array.isArray(d.scareImages) ? d.scareImages : [];
+      updateScareButtonLabel();
+    });
+  } catch (_) {}
+}
+
+function saveCustomScareImages() {
+  try { chrome.storage.local.set({ scareImages: customScareImages }); } catch (_) {}
+}
+
+// Resize an uploaded image to a small data URL so it's WebSocket-friendly (~30KB)
+function resizeImageToDataUrl(file, maxSize = 400, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(maxSize / img.width, maxSize / img.height, 1);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function doJumpscare(from, imageUrl) {
   const e = SCARE_EFFECTS[Math.floor(Math.random() * SCARE_EFFECTS.length)];
   const s = document.createElement('style');
   s.textContent = `
@@ -837,10 +891,51 @@ function doJumpscare(from) {
   document.head.appendChild(s);
   const el = document.createElement('div');
   const animName = e.anim === 'shake' ? '__dp_shake' : '__dp_flash';
-  el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;font-size:20vw;animation:${animName} .7s ease-out forwards;pointer-events:none;`;
-  el.textContent = e.emoji;
+  el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;animation:${animName} .7s ease-out forwards;pointer-events:none;`;
+  if (imageUrl) {
+    const img = document.createElement('img');
+    img.src = imageUrl;
+    img.style.cssText = 'max-width:80vw;max-height:80vh;object-fit:contain;';
+    el.appendChild(img);
+  } else {
+    el.style.fontSize = '20vw';
+    el.textContent = e.emoji;
+  }
   document.body.appendChild(el);
   el.addEventListener('animationend', () => { el.remove(); s.remove(); });
+}
+
+// Get the most recent scare cooldown remaining (in ms). 0 if ready.
+function scareCooldownRemaining() {
+  return Math.max(0, SCARE_COOLDOWN_MS - (Date.now() - lastScareAt));
+}
+
+// Update the scare button label to reflect cooldown + custom image count
+let scareCooldownTimer = null;
+function updateScareButtonLabel() {
+  if (!shadow) return;
+  const btn = shadow.getElementById('scare');
+  if (!btn) return;
+  const remaining = scareCooldownRemaining();
+  if (remaining > 0) {
+    btn.disabled = true;
+    btn.textContent = `⏳ ${Math.ceil(remaining / 1000)}s`;
+    btn.style.opacity = '0.5';
+    if (!scareCooldownTimer) {
+      scareCooldownTimer = setInterval(() => {
+        if (scareCooldownRemaining() <= 0) {
+          clearInterval(scareCooldownTimer);
+          scareCooldownTimer = null;
+        }
+        updateScareButtonLabel();
+      }, 500);
+    }
+  } else {
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    const count = customScareImages.length;
+    btn.textContent = count > 0 ? `😈 scare (${count})` : '😈 scare';
+  }
 }
 
 // ── TENOR GIF SEARCH ──────────────────────────────────────────────────────────
@@ -956,7 +1051,14 @@ const OVERLAY_CSS = `
     font-size:.68rem;font-weight:700;padding:4px 9px;
     cursor:pointer;transition:transform .12s;white-space:nowrap;
   }
-  #scare:hover{transform:scale(1.06)}
+  #scare:hover:not(:disabled){transform:scale(1.06)}
+  #scare:disabled{cursor:not-allowed}
+  #scare-upload{
+    background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
+    color:#bf5af2;font-size:.7rem;font-weight:700;padding:4px 7px;
+    cursor:pointer;transition:background .12s;white-space:nowrap;
+  }
+  #scare-upload:hover{background:#3d0080}
 
   #gifpanel{display:none;flex-direction:column;gap:7px;padding:9px 12px;border-top:1px solid #ffffff08}
   #gifpanel.open{display:flex}
@@ -1033,6 +1135,8 @@ function buildOverlay() {
           <button class="rb" data-e="🍿">🍿</button>
           <button class="rb" data-e="💀">💀</button>
           <button id="scare">😈 scare</button>
+          <button id="scare-upload" title="upload custom scare images (jpg/png)">📷+</button>
+          <input id="scare-file-input" type="file" accept="image/*" multiple style="display:none" />
         </div>
         <div id="gifpanel">
           <input id="gifsearch" placeholder="search gifs…" autocomplete="off" />
@@ -1109,25 +1213,74 @@ function wireOverlay() {
     }
   };
 
-  // COUNTDOWN — triggers a "3-2-1 GO" on both sides simultaneously.
-  // Feature Synclify doesn't have. Perfect for "let's start the movie together".
+  // COUNTDOWN — host-only, one-shot per party. Hides after click to prevent spam.
   shadow.getElementById('countdown-btn').onclick = () => {
+    if (!isHost || countdownUsed || memberCount < 2) return; // belt + braces
+    countdownUsed = true;
     wsSend({ type: 'countdown' });
     showCountdown(); // also fire locally
+    updateCountdownButtonVisibility(); // hides the button
   };
+
+  // Initial visibility check (handles case where overlay built mid-party after restore)
+  updateCountdownButtonVisibility();
 
   shadow.querySelectorAll('.rb').forEach(b => {
     b.onclick = () => wsSend({ type: 'reaction', emoji: b.dataset.e });
   });
 
-  // cycle scare button text on each click
-  const SCARE_LABELS = ['😈 scare', '👻 boo', '🎃 spook', '💀 doom', '🦇 freak', '😱 jump'];
-  let scareIdx = 0;
+  // SCARE — 30s cooldown + optional custom image broadcast
   shadow.getElementById('scare').onclick = () => {
-    wsSend({ type: 'jumpscare' });
-    scareIdx = (scareIdx + 1) % SCARE_LABELS.length;
-    shadow.getElementById('scare').textContent = SCARE_LABELS[scareIdx];
+    if (scareCooldownRemaining() > 0) return; // gate (also button is disabled visually)
+    lastScareAt = Date.now();
+    // pick a random custom image if user has any uploaded; otherwise undefined → receiver uses default emoji
+    const imageUrl = customScareImages.length > 0
+      ? customScareImages[Math.floor(Math.random() * customScareImages.length)]
+      : undefined;
+    wsSend({ type: 'jumpscare', imageUrl });
+    updateScareButtonLabel(); // immediately reflect cooldown in the UI
   };
+
+  // SCARE IMAGE UPLOAD
+  const fileInput = shadow.getElementById('scare-file-input');
+  shadow.getElementById('scare-upload').onclick = () => fileInput.click();
+  fileInput.addEventListener('change', async (e) => {
+    const files = [...(e.target.files || [])];
+    if (!files.length) return;
+    appendSys(`📷 processing ${files.length} image${files.length > 1 ? 's' : ''}…`);
+    for (const f of files) {
+      try {
+        const dataUrl = await resizeImageToDataUrl(f, 400, 0.72);
+        // safety cap: ~150KB per image (data URLs are ~33% bigger than raw bytes)
+        if (dataUrl.length > 200_000) {
+          appendSys(`⚠️ ${f.name} too big after resize — skipped`);
+          continue;
+        }
+        customScareImages.push(dataUrl);
+      } catch (err) {
+        appendSys(`⚠️ couldn't read ${f.name}`);
+      }
+    }
+    // cap total images at 20 so chrome.storage.local doesn't bloat
+    if (customScareImages.length > 20) customScareImages = customScareImages.slice(-20);
+    saveCustomScareImages();
+    updateScareButtonLabel();
+    appendSys(`✓ ${customScareImages.length} scare image${customScareImages.length === 1 ? '' : 's'} ready`);
+    fileInput.value = ''; // allow re-uploading the same file
+  });
+  // right-click on upload button to clear all custom images
+  shadow.getElementById('scare-upload').oncontextmenu = (e) => {
+    e.preventDefault();
+    if (!customScareImages.length) return;
+    if (confirm(`clear all ${customScareImages.length} custom scare images?`)) {
+      customScareImages = [];
+      saveCustomScareImages();
+      updateScareButtonLabel();
+      appendSys('cleared custom scares — back to default emoji');
+    }
+  };
+
+  loadCustomScareImages(); // populates customScareImages, updates label
 
   const gifPanel = shadow.getElementById('gifpanel');
   shadow.getElementById('gbtn').onclick = () => {
@@ -1260,6 +1413,16 @@ function setStatus(state, text) {
   if (state === 'ok')  row.classList.add('ok');
   if (state === 'bad') row.classList.add('bad');
   txt.textContent = text;
+}
+
+// Countdown button visibility: only host, only once, only when partner has joined.
+// Hides forever after first use (per party — resets on new created/joined).
+function updateCountdownButtonVisibility() {
+  if (!shadow) return;
+  const btn = shadow.getElementById('countdown-btn');
+  if (!btn) return;
+  const visible = isHost && !countdownUsed && memberCount >= 2;
+  btn.style.display = visible ? '' : 'none';
 }
 
 function appendChat(who, text) { if (shadow) append(false, who, text); }

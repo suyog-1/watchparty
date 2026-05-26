@@ -7,7 +7,7 @@
 const WebSocket = require('ws');
 
 const SERVER = process.argv[2] || 'ws://localhost:3000';
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 
 let passed = 0, failed = 0;
 const results = [];
@@ -185,6 +185,29 @@ async function runTests() {
     if (pong.t !== sentAt) throw new Error(`pong t mismatch: ${pong.t} vs ${sentAt}`);
     pass(`sync-ping echoed back as sync-pong with original timestamp (RTT measurable)`);
   } catch (e) { fail('sync-ping', e.message); }
+
+  // ── TEST 2e: jumpscare imageUrl forwarding (v2.1 feature) ─────────────
+  console.log('\nTEST 2e: jumpscare with custom imageUrl (v2.1 feature)');
+  try {
+    const fakeDataUrl = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAS' + 'A'.repeat(100);
+    send(host, { type: 'jumpscare', imageUrl: fakeDataUrl });
+    const scare = await waitFor(joiner, m => m.type === 'jumpscare', 3000, 'jumpscare');
+    if (scare.imageUrl !== fakeDataUrl) throw new Error('imageUrl not forwarded');
+    if (scare.username !== 'host') throw new Error(`wrong sender: ${scare.username}`);
+    pass(`jumpscare imageUrl forwarded (${scare.imageUrl.length} chars)`);
+
+    // size cap: huge imageUrl should be stripped
+    const tooBig = 'data:image/jpeg;base64,' + 'A'.repeat(300_000);
+    send(host, { type: 'jumpscare', imageUrl: tooBig });
+    const scareCapped = await waitFor(joiner, m => m.type === 'jumpscare', 3000, 'jumpscare capped');
+    if (scareCapped.imageUrl !== undefined) throw new Error(`oversized imageUrl was forwarded (size: ${scareCapped.imageUrl?.length})`);
+    pass(`oversized imageUrl correctly stripped at server (250KB cap)`);
+
+    // no imageUrl: backwards-compat (emoji fallback path)
+    send(host, { type: 'jumpscare' });
+    const scareNoImg = await waitFor(joiner, m => m.type === 'jumpscare' && !m.imageUrl, 3000, 'jumpscare no image');
+    pass(`jumpscare without imageUrl still works (default emoji fallback)`);
+  } catch (e) { fail('jumpscare imageUrl', e.message); }
 
   // ── TEST 3: sender should NOT receive own playback (broadcast except sender) ───
   console.log('\nTEST 3: playback does not echo back to sender');
