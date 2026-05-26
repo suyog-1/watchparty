@@ -106,19 +106,63 @@ wss.on('connection', (ws) => {
           console.warn(`[playback] DROPPED — sender not in any room (msg=${JSON.stringify(msg)})`);
           return;
         }
-        rooms[roomId].state = { playing: msg.action === 'play', currentTime: msg.currentTime };
+        // backwards compat: accept either `eventType` (v2.0+) or `action` (v1.x)
+        const eventType = msg.eventType || msg.action;
+        const isPlay = eventType === 'play';
+        const isPause = eventType === 'pause';
+        // update room state only on meaningful changes (play/pause/seek), not volume/rate
+        if (isPlay || isPause || eventType === 'seeked') {
+          rooms[roomId].state = {
+            playing: isPlay ? true : isPause ? false : rooms[roomId].state.playing,
+            currentTime: msg.currentTime != null ? msg.currentTime : rooms[roomId].state.currentTime,
+            volume: msg.volume != null ? msg.volume : rooms[roomId].state.volume,
+            rate: msg.rate != null ? msg.rate : rooms[roomId].state.rate,
+          };
+        }
         const from = rooms[roomId].members.get(ws)?.username || 'someone';
         const recipientCount = rooms[roomId].members.size - 1;
-        console.log(`[room ${roomId}] PLAYBACK ${msg.action} @ ${msg.currentTime?.toFixed(1)}s from ${from} → ${recipientCount} others`);
-        broadcast(roomId, { type: 'playback', action: msg.action, currentTime: msg.currentTime, from }, ws);
+        console.log(`[room ${roomId}] PLAYBACK ${eventType} @ ${msg.currentTime?.toFixed(1)}s from ${from} → ${recipientCount} others`);
+        broadcast(roomId, {
+          type: 'playback', eventType, action: eventType, // include both for backwards compat
+          currentTime: msg.currentTime, volume: msg.volume, rate: msg.rate, from,
+        }, ws);
         break;
       }
 
       case 'state-ping': {
-        // silent heartbeat: updates server state for late-joiners but does NOT
-        // broadcast to other members (avoids bidirectional sync wars)
+        // silent heartbeat: updates server state for late-joiners, never broadcasts
         if (!roomId || !rooms[roomId]) return;
-        rooms[roomId].state = { playing: msg.action === 'play', currentTime: msg.currentTime };
+        rooms[roomId].state = {
+          playing: msg.action === 'play',
+          currentTime: msg.currentTime,
+          volume: msg.volume != null ? msg.volume : rooms[roomId].state.volume,
+          rate: msg.rate != null ? msg.rate : rooms[roomId].state.rate,
+        };
+        break;
+      }
+
+      case 'buffering':
+      case 'buffered': {
+        // partner buffering events — broadcast to the OTHER members so they auto-pause/resume
+        if (!roomId || !rooms[roomId]) return;
+        const from = rooms[roomId].members.get(ws)?.username || 'someone';
+        console.log(`[room ${roomId}] ${msg.type.toUpperCase()} from ${from}`);
+        broadcast(roomId, { type: msg.type, from }, ws);
+        break;
+      }
+
+      case 'countdown': {
+        // 3-2-1 synchronized start
+        if (!roomId || !rooms[roomId]) return;
+        const from = rooms[roomId].members.get(ws)?.username || 'someone';
+        console.log(`[room ${roomId}] COUNTDOWN triggered by ${from}`);
+        broadcast(roomId, { type: 'countdown', from }, ws);
+        break;
+      }
+
+      case 'sync-ping': {
+        // latency probe — echo it straight back to sender so they can measure RTT
+        send(ws, { type: 'sync-pong', t: msg.t });
         break;
       }
 

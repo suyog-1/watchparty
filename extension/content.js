@@ -50,42 +50,51 @@ function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 // ── VIDEO DETECTION ─────────────────────────────────────────────
 
 let videoEl     = null;
-let isSyncing   = false;
 let videoMutObs = null;
 let inRoom      = false;
-let isHost      = false; // true if we created the room (we're the sync authority)
+let isHost      = false; // true if we created the room
 let pendingPlayback = null; // queued playback event waiting for videoEl
 let videoFoundPending = false;
 let videoPollInterval = null;
 let videoInIframeId = null; // (top frame only) frameId of iframe holding the video
 let shadow = null;
-let attachedAt = 0; // timestamp when video was attached — for "settle window" after page nav
-let lastVisibilityChange = 0; // timestamp of last visibilitychange — suppress pause events from tab-switching
-let weJustSeeked = false; // flag — true briefly after WE programmatically set currentTime
-const SCRIPT_LOAD_TIME = Date.now(); // for settle window (vs attachedAt which can reset)
-let lastUserClickTime = 0; // timestamp of last real user gesture — required for outbound events
-let lastUserActionAt = 0; // timestamp of last user action we EMITTED — suppress in-flight sync from yanking us back
 let autoplayBlocked = false; // true if browser refused our last play() call
-let userSeekInProgress = false; // user-initiated seek is buffering — allow the eventual 'seeked' through
-// drift-check state: what we last know about the shared playback
-let lastSharedAction = null;   // 'play' / 'pause' / null
-let lastSharedTime = 0;        // currentTime at the moment of the last shared event
-let lastSharedAt = 0;          // local Date.now() when we received/sent it
 
-// Track real user interaction so we can distinguish user actions from player auto-events
+// ── SYNTHETIC EVENT SUPPRESSION (Synclify-style) ──────────────────────────────
+// When WE programmatically apply a sync (play/pause/seek/volume/rate change),
+// the browser fires a corresponding event. Without suppression, that event
+// gets re-broadcast and the other side echoes it back → infinite ping-pong.
+// Solution: set a counter before the action, the next N events of matching
+// types are consumed without broadcasting. No timing windows, no races.
+const syntheticEventQueue = []; // array of event types pending suppression
+
+function suppressNext(eventType) {
+  syntheticEventQueue.push(eventType);
+  // safety: if no event arrives within 2s (e.g. play was a no-op), drop it
+  setTimeout(() => {
+    const idx = syntheticEventQueue.indexOf(eventType);
+    if (idx >= 0) syntheticEventQueue.splice(idx, 1);
+  }, 2000);
+}
+
+function shouldSuppressEvent(eventType) {
+  const idx = syntheticEventQueue.indexOf(eventType);
+  if (idx < 0) return false;
+  syntheticEventQueue.splice(idx, 1);
+  return true;
+}
+
+// Track clicks only to (a) reset autoplay-blocked flag and (b) detect server-button clicks
 document.addEventListener('click',    onUserGesture, true);
 document.addEventListener('keydown',  onUserGesture, true);
 document.addEventListener('touchend', onUserGesture, true);
 
 function onUserGesture(e) {
-  lastUserClickTime = Date.now();
   autoplayBlocked = false;
   if (e.type === 'click') detectServerButtonClick(e);
 }
 
-// Detect when host clicks a "server" button on shady streaming sites. Common labels:
-// Server 1/2/3, VidPlay, FileMoon, StreamTape, DoodStream, UpCloud, MixDrop, VidCloud, VidSrc, etc.
-// When detected, notify partner via chat — they can manually click the matching one.
+// Detect when host clicks a "server" button on shady streaming sites.
 const SERVER_RE = /^(server\s*\d+|vidplay|filemoon|streamtape|doodstream|upcloud|mixdrop|vidcloud|vidsrc|streamwish|streamhg|playerwish|netu|wolfstream|netulounge|cloudvideo|streamsb|filelions|gomo)/i;
 function detectServerButtonClick(e) {
   if (!inRoom) return;
@@ -94,14 +103,9 @@ function detectServerButtonClick(e) {
   const text = (el.textContent || '').trim().slice(0, 40);
   if (!text || text.length > 40) return;
   if (SERVER_RE.test(text)) {
-    // broadcast a chat-level notification (not auto-clicked on partner side — too fragile)
     wsSend({ type: 'chat', text: `🎬 switched to: ${text}` });
   }
 }
-
-document.addEventListener('visibilitychange', () => {
-  lastVisibilityChange = Date.now();
-});
 
 function findVideo() {
   // YouTube-specific: main player has class 'html5-main-video'
@@ -122,6 +126,10 @@ function findVideo() {
   return all[0];
 }
 
+// All the HTMLVideoElement events we sync across the wire.
+// Each maps directly to itself on the receiving side — no translation.
+const SYNCED_VIDEO_EVENTS = ['play', 'pause', 'seeked', 'volumechange', 'ratechange'];
+
 function attachVideo(video) {
   if (videoEl === video) {
     applyPendingPlayback();
@@ -129,12 +137,14 @@ function attachVideo(video) {
   }
   detachVideo();
   videoEl = video;
-  attachedAt = Date.now(); // start of "settle window" — suppress outbound seeks for 5s
-  video.addEventListener('play',    onPlay);
-  video.addEventListener('pause',   onPause);
-  video.addEventListener('seeked',  onSeeked);
-  video.addEventListener('seeking', onSeeking); // fires IMMEDIATELY on seek (before buffer arrives)
-  // re-register if duration becomes known later (initial duration is often NaN/0)
+
+  // Attach ONE handler to every synced event type. The handler is identical:
+  // if syntheticEventQueue has this type queued, consume + suppress. Otherwise broadcast.
+  for (const evt of SYNCED_VIDEO_EVENTS) {
+    video.addEventListener(evt, onSyncedVideoEvent, true); // capture phase, run before site listeners
+  }
+
+  // Re-register if duration becomes known later (initial duration is often NaN/0)
   const onDurChange = () => {
     if (videoEl === video && isFinite(video.duration) && video.duration > 60) {
       safeSendMessage({ type: 'register-video-frame', duration: video.duration });
@@ -142,7 +152,11 @@ function attachVideo(video) {
     }
   };
   video.addEventListener('durationchange', onDurChange);
-  // initial register
+
+  // Buffering signals (sub-feature Synclify doesn't have): tell partner when we stall
+  video.addEventListener('waiting', onBuffering);
+  video.addEventListener('playing', onBufferResolved);
+
   safeSendMessage({
     type: 'register-video-frame',
     duration: isFinite(video.duration) ? video.duration : 0,
@@ -150,13 +164,14 @@ function attachVideo(video) {
   if (IS_TOP) {
     if (shadow) appendSys('video found — sync ready 🎬');
     else videoFoundPending = true;
-    // when host's video attaches, broadcast state immediately so joiner can sync
     if (inRoom && isHost) {
       setTimeout(() => {
         if (videoEl) wsSend({
           type: 'playback',
-          action: videoEl.paused ? 'pause' : 'play',
+          eventType: videoEl.paused ? 'pause' : 'play',
           currentTime: videoEl.currentTime,
+          volume: videoEl.volume,
+          rate: videoEl.playbackRate,
         });
       }, 300);
     }
@@ -168,134 +183,114 @@ function applyPendingPlayback() {
   if (!pendingPlayback || !videoEl) return;
   const p = pendingPlayback;
   pendingPlayback = null;
-  setTimeout(() => applyPlayback(p.action, p.currentTime), 200);
+  setTimeout(() => applyRemoteVideoEvent(p), 200);
 }
 
 function detachVideo() {
   if (!videoEl) return;
-  videoEl.removeEventListener('play',    onPlay);
-  videoEl.removeEventListener('pause',   onPause);
-  videoEl.removeEventListener('seeked',  onSeeked);
-  videoEl.removeEventListener('seeking', onSeeking);
+  for (const evt of SYNCED_VIDEO_EVENTS) {
+    videoEl.removeEventListener(evt, onSyncedVideoEvent, true);
+  }
+  videoEl.removeEventListener('waiting', onBuffering);
+  videoEl.removeEventListener('playing', onBufferResolved);
   videoEl = null;
-  if (seekDebounceTimer) { clearTimeout(seekDebounceTimer); seekDebounceTimer = null; }
+  syntheticEventQueue.length = 0;
 }
 
-// fires the MOMENT a seek is initiated (before buffer arrives). Record user intent
-// here so the eventual 'seeked' (possibly seconds later if buffering) can still pass
-// the eventGate, AND so drift correction doesn't yank us back during the buffer wait.
-function onSeeking() {
-  if (Date.now() - lastUserClickTime < 800) {
-    userSeekInProgress = true;
-    lastUserActionAt = Date.now();
+// THE CORE: one handler for all video events. Synclify-style suppression via
+// per-event-type queue instead of timer-based windows. Bulletproof.
+function onSyncedVideoEvent(e) {
+  // Skip preview/ad videos in any frame
+  if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return;
+
+  if (shouldSuppressEvent(e.type)) {
+    e.stopImmediatePropagation();
+    return;
   }
+  if (IS_TOP && !inRoom) return;
+
+  emitVideoEvent(e.type, videoEl.currentTime, videoEl.volume, videoEl.playbackRate);
 }
 
-// Top frame checks inRoom locally; iframes always emit and let background gate
-function onPlay()   { if (eventGate('play'))  { lastUserActionAt = Date.now(); emitVideoEvent('play',  videoEl.currentTime); } }
-function onPause()  { if (eventGate('pause')) { lastUserActionAt = Date.now(); emitVideoEvent('pause', videoEl.currentTime); } }
-
-// debounce seeked — players fire 2-4 seeked events for one user scrub
-let seekDebounceTimer = null;
-function onSeeked() {
-  if (!eventGate('seek')) return;
-  // CRITICAL: set lastUserActionAt NOW (not when debounce fires), so partner's in-flight
-  // events during the 400ms window are correctly suppressed
-  lastUserActionAt = Date.now();
-  clearTimeout(seekDebounceTimer);
-  seekDebounceTimer = setTimeout(() => {
-    seekDebounceTimer = null;
-    if (videoEl) emitVideoEvent(videoEl.paused ? 'pause' : 'play', videoEl.currentTime);
-  }, 400);
-}
-
-function eventGate(kind) {
-  if (isSyncing) return false;
-  if (kind === 'seek' && weJustSeeked) return false;
-
-  if (IS_TOP && !inRoom) return false;
-  // skip preview/thumbnail/ad videos (any frame) — duration too short to be the main movie
-  if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return false;
-
-  // If the user just started a seek (seeking event fired within click window) and the
-  // eventual seeked is arriving (possibly seconds later due to buffering) — pass it through.
-  if (kind === 'seek' && userSeekInProgress) {
-    userSeekInProgress = false;
-    return true;
-  }
-
-  // Tight 800ms user-gesture window. Player auto-events fire within seconds of a click
-  // (player loads, resumes from last position, etc.) — those need to be filtered out.
-  if (Date.now() - lastUserClickTime > 800) return false;
-
-  // settle window from PAGE LOAD (handles shady site auto-resume)
-  if (kind === 'seek' && Date.now() - SCRIPT_LOAD_TIME < 5000) return false;
-
-  // tab-switch suppression (YouTube debounces visibility events, 2s window covers them)
-  if (kind === 'pause' && lastVisibilityChange && Date.now() - lastVisibilityChange < 2000) return false;
-
-  return true;
-}
-
-function emitVideoEvent(action, currentTime) {
-  // record OUR action as the shared baseline (both sides will then compute drift from same anchor)
-  // Note: lastUserActionAt is already set by the on{Play/Pause/Seeked} handlers at the moment
-  // of the actual user event, not here — keeping this in-flight protection accurate.
-  lastSharedAction = action;
-  lastSharedTime = currentTime;
-  lastSharedAt = Date.now();
-
+function emitVideoEvent(eventType, currentTime, volume, rate) {
+  const payload = { eventType, currentTime, volume, rate };
   if (IS_TOP) {
-    wsSend({ type: 'playback', action, currentTime });
-    appendSys(`📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s`);
-    setStatus('ok', `→sent: ${action} @ ${currentTime.toFixed(0)}s`);
+    wsSend({ type: 'playback', ...payload });
+    setStatus('ok', `→${eventType} @ ${currentTime.toFixed(0)}s`);
+    // Don't spam chat log for volume/rate (too frequent). Only meaningful events.
+    if (eventType === 'play' || eventType === 'pause' || eventType === 'seeked') {
+      appendSys(`📤 you ${eventType === 'play' ? 'played' : eventType === 'pause' ? 'paused' : 'seeked to'} @ ${currentTime.toFixed(0)}s`);
+    }
   } else {
-    safeSendMessage({ type: 'iframe-video-event', action, currentTime });
-    safeSendMessage({ type: 'iframe-debug', text: `📤 you ${action === 'play' ? 'played' : 'paused'} @ ${currentTime.toFixed(0)}s` });
+    safeSendMessage({ type: 'iframe-video-event', ...payload });
   }
 }
 
-function applyPlayback(action, currentTime) {
-  // cancel any pending seek-debounce — otherwise it'll fire 400ms later with partner's
-  // currentTime (since we just set it here) and echo their position back as ours
-  if (seekDebounceTimer) { clearTimeout(seekDebounceTimer); seekDebounceTimer = null; }
-
-  // record the shared timeline anchor whenever we receive a sync event
-  lastSharedAction = action;
-  lastSharedTime = currentTime;
-  lastSharedAt = Date.now();
-
+// Apply a remote sync event to our video. ALWAYS queues the corresponding
+// synthetic event for suppression first, so we don't echo back.
+function applyRemoteVideoEvent(p) {
   if (!videoEl) {
-    pendingPlayback = { action, currentTime };
+    pendingPlayback = p;
     if (IS_TOP && !videoInIframeId && !window.__dp_queued_logged__) {
       window.__dp_queued_logged__ = true;
       appendSys('queued — waiting for video to load ⏳');
     }
     return;
   }
-  isSyncing = true;
-  const oldTime = videoEl.currentTime;
-  const diff = Math.abs(oldTime - currentTime);
-  if (diff > 1.5) {
-    weJustSeeked = true;
-    videoEl.currentTime = currentTime;
-    setTimeout(() => { weJustSeeked = false; }, 2500);
-    if (IS_TOP) appendSys(`🎯 seeked ${oldTime.toFixed(0)}s → ${currentTime.toFixed(0)}s`);
-  }
-  if (action === 'play') {
-    // if autoplay was already blocked, don't keep trying — just show banner
-    if (autoplayBlocked) {
-      showAutoplayBanner();
-    } else {
-      videoEl.play().catch(() => {
-        autoplayBlocked = true;
+
+  switch (p.eventType) {
+    case 'play':
+      suppressNext('play');
+      if (autoplayBlocked) {
         showAutoplayBanner();
-      });
-    }
-  } else {
-    videoEl.pause(); // pause always works without user gesture
+      } else {
+        videoEl.play().catch(() => { autoplayBlocked = true; showAutoplayBanner(); });
+      }
+      break;
+    case 'pause':
+      suppressNext('pause');
+      videoEl.pause();
+      break;
+    case 'seeked':
+      // Only seek if meaningfully different (avoid syncing micro-drift)
+      if (Math.abs(videoEl.currentTime - p.currentTime) > 0.5) {
+        suppressNext('seeked');
+        videoEl.currentTime = p.currentTime;
+        if (IS_TOP) appendSys(`🎯 synced to ${p.currentTime.toFixed(0)}s`);
+      }
+      break;
+    case 'volumechange':
+      if (p.volume !== undefined && Math.abs(videoEl.volume - p.volume) > 0.01) {
+        suppressNext('volumechange');
+        videoEl.volume = p.volume;
+      }
+      break;
+    case 'ratechange':
+      if (p.rate !== undefined && Math.abs(videoEl.playbackRate - p.rate) > 0.01) {
+        suppressNext('ratechange');
+        videoEl.playbackRate = p.rate;
+        if (IS_TOP) appendSys(`⏩ playback speed: ${p.rate}x`);
+      }
+      break;
   }
-  setTimeout(() => { isSyncing = false; }, 1500);
+}
+
+// ── BUFFERING-AWARE SYNC ────────────────────────────────────────────────────
+// When YOU stall (buffer underrun), tell partner so they can wait for you.
+// When you recover, tell them you're ready to resume.
+// This is a feature Synclify doesn't have — huge for shady sites that buffer constantly.
+let isBuffering = false;
+function onBuffering() {
+  if (!inRoom || isBuffering) return;
+  isBuffering = true;
+  if (IS_TOP) wsSend({ type: 'buffering' });
+  else safeSendMessage({ type: 'iframe-buffering' });
+}
+function onBufferResolved() {
+  if (!inRoom || !isBuffering) return;
+  isBuffering = false;
+  if (IS_TOP) wsSend({ type: 'buffered' });
+  else safeSendMessage({ type: 'iframe-buffered' });
 }
 
 // Big floating banner shown when a newer extension version exists on GitHub.
@@ -328,6 +323,46 @@ function showUpdateBanner(newVersion, currentVersion, url) {
   (document.fullscreenElement || document.body || document.documentElement).appendChild(banner);
 }
 
+// Pre-roll countdown — both sides see a synchronized "3... 2... 1... GO" overlay
+// and both videos start playing at the same instant. Feature Synclify doesn't have.
+function showCountdown(triggeredBy) {
+  if (document.getElementById('__dp_countdown__')) return;
+  const overlay = document.createElement('div');
+  overlay.id = '__dp_countdown__';
+  overlay.style.cssText = [
+    'position:fixed','inset:0','z-index:2147483647',
+    'background:rgba(0,0,0,0.7)','color:#fff',
+    'display:flex','flex-direction:column','align-items:center','justify-content:center',
+    'font-family:system-ui,sans-serif','pointer-events:none',
+  ].join(';');
+  const num = document.createElement('div');
+  num.style.cssText = 'font-size:30vw;font-weight:900;background:linear-gradient(135deg,#ff2d78,#bf5af2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;';
+  const label = document.createElement('div');
+  label.style.cssText = 'font-size:1.2rem;color:#bf5af2;margin-top:20px;opacity:.8';
+  label.textContent = triggeredBy ? `${triggeredBy} started a countdown` : 'starting together…';
+  overlay.appendChild(num);
+  overlay.appendChild(label);
+  (document.fullscreenElement || document.body || document.documentElement).appendChild(overlay);
+
+  let n = 3;
+  num.textContent = n;
+  const tick = setInterval(() => {
+    n--;
+    if (n <= 0) {
+      clearInterval(tick);
+      num.textContent = 'GO! 🎬';
+      // Play the video on both sides simultaneously
+      if (videoEl) {
+        suppressNext('play');
+        videoEl.play().catch(() => { autoplayBlocked = true; showAutoplayBanner(); });
+      }
+      setTimeout(() => overlay.remove(), 800);
+    } else {
+      num.textContent = n;
+    }
+  }, 1000);
+}
+
 function showAutoplayBanner() {
   if (document.getElementById('__dp_autoplay_banner__')) return;
   const banner = document.createElement('div');
@@ -348,11 +383,9 @@ function showAutoplayBanner() {
     banner.remove();
     style.remove();
     autoplayBlocked = false;
-    lastUserClickTime = Date.now();
     if (videoEl) videoEl.play().catch(() => { autoplayBlocked = true; });
   };
   (document.fullscreenElement || document.body || document.documentElement).appendChild(banner);
-  // banner stays until user clicks (don't auto-remove — they need to interact for sync to work)
 }
 
 function pollForVideo() {
@@ -400,14 +433,15 @@ document.addEventListener('durationchange', videoEventCapture, true);
 document.addEventListener('loadedmetadata', videoEventCapture, true);
 document.addEventListener('canplay',        videoEventCapture, true);
 
-// Sync heartbeat every 2s. Runs in any frame that has the videoEl.
-// - Top frame with video: send directly to WS via wsSend
-// - Iframe with video: send via 'iframe-heartbeat' to background, it'll relay
+// Lightweight heartbeat — only used for:
+//   1. Telling server about state for late-joiners (silent state-ping)
+//   2. Diagnosing "where's the video?" when not found
+// NO drift correction — Synclify proved each side can play independently after
+// initial sync. Drift correction caused more bugs than it solved.
 let heartbeatLoggedNoVideo = 0;
 setInterval(() => {
-  if (!extContextValid()) return; // silently skip on dead context, don't stop forever
+  if (!extContextValid()) return;
 
-  // top frame: warn if no video found locally AND no iframe has registered one
   if (IS_TOP && !videoEl && !videoInIframeId) {
     if (!inRoom) return;
     heartbeatLoggedNoVideo++;
@@ -420,11 +454,9 @@ setInterval(() => {
     return;
   }
 
-  // non-top frame: report periodically so we can see what's inside the nested iframes
   if (!IS_TOP && !videoEl) {
     heartbeatLoggedNoVideo++;
     if (heartbeatLoggedNoVideo === 3) {
-      // bubble up info about this frame to the top frame's overlay
       const count = document.querySelectorAll('video').length;
       const iframes = document.querySelectorAll('iframe').length;
       const url = location.href.slice(0, 60);
@@ -436,44 +468,31 @@ setInterval(() => {
     return;
   }
 
-  // only the frame WITH videoEl broadcasts state
   if (!videoEl) return;
-
-  // skip preview/thumbnail videos in ANY frame (not just iframes)
   if (isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return;
-
   heartbeatLoggedNoVideo = 0;
 
+  // Silent state-ping for late-joiner catchup. Server stores, never broadcasts.
   const action = videoEl.paused ? 'pause' : 'play';
   const currentTime = videoEl.currentTime;
-
-  // SILENT state-ping (never broadcast — server stores for late joiners only)
   if (IS_TOP) {
-    if (inRoom) wsSend({ type: 'state-ping', action, currentTime });
+    if (inRoom) wsSend({ type: 'state-ping', action, currentTime, volume: videoEl.volume, rate: videoEl.playbackRate });
   } else {
-    safeSendMessage({ type: 'iframe-heartbeat', action, currentTime });
-  }
-
-  // ── DRIFT CHECK — local computation, no network ──────────────────
-  // Skip if tab is hidden (background-throttled timers vs video clock produce false drifts)
-  if (document.hidden) return;
-  // Skip if video is actively buffering or mid-seek — don't second-guess the player
-  if (videoEl.seeking || videoEl.readyState < 3) return;
-  if (lastSharedAction && Date.now() - lastUserActionAt > 5000 && !isSyncing && !autoplayBlocked) {
-    let expected = lastSharedTime;
-    if (lastSharedAction === 'play') {
-      expected += (Date.now() - lastSharedAt) / 1000;
-    }
-    const drift = Math.abs(currentTime - expected);
-    if (drift > 3) {
-      weJustSeeked = true;
-      videoEl.currentTime = expected;
-      setTimeout(() => { weJustSeeked = false; }, 2500);
-      if (IS_TOP) appendSys(`drift ${drift.toFixed(0)}s — corrected`);
-      else safeSendMessage({ type: 'iframe-debug', text: `drift ${drift.toFixed(0)}s — corrected` });
-    }
+    safeSendMessage({ type: 'iframe-heartbeat', action, currentTime, volume: videoEl.volume, rate: videoEl.playbackRate });
   }
 }, 5000);
+
+// ── PING/PONG LATENCY MEASUREMENT ────────────────────────────────────────────
+// Synclify doesn't have this. Show partner's round-trip latency in the overlay.
+let pingSentAt = 0;
+let lastLatencyMs = null;
+if (IS_TOP) {
+  setInterval(() => {
+    if (!inRoom || !extContextValid()) return;
+    pingSentAt = Date.now();
+    wsSend({ type: 'sync-ping', t: pingSentAt });
+  }, 10000);
+}
 
 // ── URL CHANGE DETECTION ─────────────────────────────────────────────
 // Top frame: broadcasts full page navigations
@@ -548,23 +567,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // playback from background → apply to local video (iframe or main)
+  // No time-based suppression needed — the syntheticEventQueue handles echoes precisely.
   if (msg.type === 'apply-playback') {
-    // ignore incoming syncs for 1.5s after WE took an action — in-flight partner events
-    // would otherwise yank us back. 1.5s is a compromise: long enough to cover the round-trip
-    // back from server, short enough that a real subsequent partner action isn't suppressed.
-    if (Date.now() - lastUserActionAt < 1500) {
-      console.log('[daddys party] iframe apply-playback SUPPRESSED — recent user action');
-      sendResponse({ ok: true });
-      return true;
-    }
-    console.log('[daddys party] iframe apply-playback', msg.action, '@', msg.currentTime?.toFixed(1));
     const hadVideo = !!videoEl;
-    applyPlayback(msg.action, msg.currentTime);
+    applyRemoteVideoEvent({
+      eventType: msg.eventType || msg.action, // tolerate old field name
+      currentTime: msg.currentTime,
+      volume: msg.volume,
+      rate: msg.rate,
+    });
     if (!IS_TOP) {
       safeSendMessage({
         type: 'iframe-debug',
         text: hadVideo
-          ? `iframe synced → ${msg.action} @ ${msg.currentTime.toFixed(0)}s`
+          ? `iframe synced → ${msg.eventType || msg.action} @ ${(msg.currentTime || 0).toFixed(0)}s`
           : `iframe got msg but no video yet — re-scanning`,
       });
       if (!hadVideo) {
@@ -593,11 +609,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // top frame asked iframe to push its current playback state (force-resync button)
   if (msg.type === 'force-emit-state' && !IS_TOP) {
     if (videoEl) {
-      lastUserActionAt = Date.now();
       safeSendMessage({
         type: 'iframe-video-event',
-        action: videoEl.paused ? 'pause' : 'play',
+        eventType: videoEl.paused ? 'pause' : 'play',
         currentTime: videoEl.currentTime,
+        volume: videoEl.volume,
+        rate: videoEl.playbackRate,
       });
       safeSendMessage({
         type: 'iframe-debug',
@@ -682,13 +699,13 @@ function handleServerMsg(msg) {
       clearChatLog(); // fresh party = fresh chat
       overlaySetRoom(msg.roomId);
       setStatus('ok', 'connected — joiner');
-      // skip applying state if server JUST recreated the room (Render restart) — its
-      // default {pause, 0} would wipe both sides back to start. Wait for other side's state-ping.
       if (msg.state && !msg.recreated) {
-        pendingPlayback = { action: msg.state.playing ? 'play' : 'pause', currentTime: msg.state.currentTime };
-        lastSharedAction = msg.state.playing ? 'play' : 'pause';
-        lastSharedTime = msg.state.currentTime;
-        lastSharedAt = Date.now();
+        pendingPlayback = {
+          eventType: msg.state.playing ? 'play' : 'pause',
+          currentTime: msg.state.currentTime,
+          volume: msg.state.volume,
+          rate: msg.state.rate,
+        };
       } else if (msg.recreated) {
         appendSys('server restarted — keeping current position');
       }
@@ -709,15 +726,16 @@ function handleServerMsg(msg) {
       break;
     case 'peer-joined':
       appendSys(`${msg.username} ${pick(JOIN_MSGS)}`);
-      // re-broadcast our URL AND current playback state so the joiner syncs to us
       if (inRoom) {
         setTimeout(() => {
           wsSend({ type: 'url-change', url: location.href });
           if (videoEl) {
             wsSend({
               type: 'playback',
-              action: videoEl.paused ? 'pause' : 'play',
+              eventType: videoEl.paused ? 'pause' : 'play',
               currentTime: videoEl.currentTime,
+              volume: videoEl.volume,
+              rate: videoEl.playbackRate,
             });
           }
         }, 500);
@@ -725,34 +743,61 @@ function handleServerMsg(msg) {
       break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
     case 'version-mismatch':
-      // big visible warning — outdated client = broken sync
       appendSys(`⚠️ VERSION MISMATCH — ${msg.versions}`);
       appendSys(`⚠️ older side won't have latest sync fixes! update at:`);
       appendSys(`github.com/suyog-1/watchparty/releases/latest`);
       setStatus('bad', '⚠ version mismatch — sync may break');
       break;
-    case 'playback': {
-      // suppress in-flight partner sync for 1.5s after our own user action (was 2.5s, too aggressive)
-      if (Date.now() - lastUserActionAt < 1500) {
-        console.log('[daddys party] playback from', msg.from, 'SUPPRESSED — recent user action');
-        appendSys(`(skipped ${msg.from}'s sync — your action wins)`);
-        break;
-      }
 
-      console.log('[daddys party] applying playback from', msg.from, msg.action, '@', msg.currentTime?.toFixed(1));
-      setStatus('ok', `←sync from ${msg.from}: ${msg.action} @ ${msg.currentTime.toFixed(0)}s`);
-      const wasPlaying = videoEl ? !videoEl.paused : false;
-      const wasTime = videoEl ? videoEl.currentTime : 0;
-      const isStateChange = videoEl && (
-        wasPlaying !== (msg.action === 'play') ||
-        Math.abs(wasTime - msg.currentTime) > 2
-      );
-      applyPlayback(msg.action, msg.currentTime);
-      if (isStateChange || !videoEl) {
-        appendSys(`${msg.from} ${msg.action === 'play' ? pick(PLAY_MSGS) : pick(PAUSE_MSGS)}`);
-      } else {
-        appendSys(`✓ in sync with ${msg.from} @ ${msg.currentTime.toFixed(0)}s`);
+    case 'playback': {
+      // No timing-based suppression — the syntheticEventQueue handles echo prevention precisely.
+      const eventType = msg.eventType || msg.action; // tolerate old field name for backwards compat
+      setStatus('ok', `←${msg.from}: ${eventType} @ ${(msg.currentTime || 0).toFixed(0)}s`);
+      applyRemoteVideoEvent({
+        eventType, currentTime: msg.currentTime, volume: msg.volume, rate: msg.rate,
+      });
+      // Only show chat for the "interesting" events, not every volumechange
+      if (eventType === 'play') appendSys(`${msg.from} ${pick(PLAY_MSGS)}`);
+      else if (eventType === 'pause') appendSys(`${msg.from} ${pick(PAUSE_MSGS)}`);
+      else if (eventType === 'seeked') appendSys(`${msg.from} jumped to ${(msg.currentTime || 0).toFixed(0)}s 🎯`);
+      break;
+    }
+
+    case 'buffering':
+      // Partner stalled — auto-pause our video so we wait together
+      if (videoEl && !videoEl.paused) {
+        suppressNext('pause');
+        videoEl.pause();
       }
+      setStatus('bad', `⏳ ${msg.from} is buffering…`);
+      appendSys(`⏳ ${msg.from} is buffering — paused so you can wait together`);
+      break;
+
+    case 'buffered':
+      // Partner recovered — auto-resume
+      if (videoEl && videoEl.paused) {
+        suppressNext('play');
+        videoEl.play().catch(() => { autoplayBlocked = true; showAutoplayBanner(); });
+      }
+      setStatus('ok', `▶ ${msg.from} ready — resumed`);
+      appendSys(`✓ ${msg.from} recovered — playing again`);
+      break;
+
+    case 'sync-pong': {
+      // Partner echoed back our ping — measure round-trip
+      if (msg.t && msg.t === pingSentAt) {
+        lastLatencyMs = Date.now() - msg.t;
+        if (shadow) {
+          const el = shadow.getElementById('latency');
+          if (el) el.textContent = `${lastLatencyMs}ms`;
+        }
+      }
+      break;
+    }
+
+    case 'countdown': {
+      // Pre-roll countdown — synchronized start ("3... 2... 1... GO")
+      showCountdown(msg.from);
       break;
     }
     case 'chat':       appendChat(msg.username, msg.text); break;
@@ -885,15 +930,17 @@ const OVERLAY_CSS = `
   .m.s  .txt{color:#7755aa;font-style:italic}
   .m .gimg{max-width:100%;border-radius:8px;margin-top:3px}
 
-  #status-row{display:flex;align-items:center;gap:6px;padding:6px 12px;border-top:1px solid #ffffff08;flex-shrink:0;font-size:.68rem;color:#9969cc}
+  #status-row{display:flex;align-items:center;gap:6px;padding:6px 12px;border-top:1px solid #ffffff08;flex-shrink:0;font-size:.68rem;color:#9969cc;flex-wrap:wrap}
   #status-row .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#888}
   #status-row.ok .dot{background:#4ade80}
   #status-row.bad .dot{background:#ef4444}
-  #resync-btn{
-    margin-left:auto;background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
+  #latency{font-size:.62rem;color:#664488;margin-left:4px}
+  #resync-btn, #countdown-btn{
+    background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
     color:#bf5af2;font-size:.68rem;font-weight:700;padding:3px 8px;cursor:pointer;
   }
-  #resync-btn:hover{background:#3d0080}
+  #resync-btn{margin-left:auto}
+  #resync-btn:hover, #countdown-btn:hover{background:#3d0080}
 
   #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0}
   .rb{
@@ -974,7 +1021,9 @@ function buildOverlay() {
         <div id="status-row">
           <span class="dot"></span>
           <span id="status-text">checking…</span>
-          <button id="resync-btn" title="push your current playback position to your partner">🔧 push sync</button>
+          <span id="latency"></span>
+          <button id="countdown-btn" title="3-2-1 countdown so you both start at the same instant">🎬 3-2-1</button>
+          <button id="resync-btn" title="push your current playback position to your partner">🔧 push</button>
         </div>
         <div id="rxns">
           <button class="rb" data-e="❤️">❤️</button>
@@ -1037,30 +1086,34 @@ function wireOverlay() {
     });
   };
 
-  // FORCE PUSH SYNC — emits current playback state immediately, bypassing the gesture gate.
-  // Use when sync is stuck/glitchy and you want to force your partner to your current position.
+  // FORCE PUSH SYNC — emits current playback state immediately. Escape hatch.
   shadow.getElementById('resync-btn').onclick = () => {
     if (!videoEl) {
-      // try to find one in the iframe via background routing
       const v = findVideo();
       if (v) attachVideo(v);
     }
     if (videoEl) {
-      lastUserActionAt = Date.now(); // protect against partner echo for 1.5s
       const payload = {
         type: 'playback',
-        action: videoEl.paused ? 'pause' : 'play',
+        eventType: videoEl.paused ? 'pause' : 'play',
         currentTime: videoEl.currentTime,
+        volume: videoEl.volume,
+        rate: videoEl.playbackRate,
       };
       if (IS_TOP) wsSend(payload);
-      else safeSendMessage({ type: 'iframe-video-event', action: payload.action, currentTime: payload.currentTime });
-      appendSys(`🔧 forced push: ${payload.action} @ ${payload.currentTime.toFixed(0)}s`);
+      else safeSendMessage({ type: 'iframe-video-event', ...payload });
+      appendSys(`🔧 forced push: ${payload.eventType} @ ${payload.currentTime.toFixed(0)}s`);
     } else {
-      // top frame has no videoEl — ask any iframe with video to push
       appendSys('🔧 push requested — checking iframes…');
-      // background can route to the registered video frame
       safeSendMessage({ type: 'request-iframe-push' });
     }
+  };
+
+  // COUNTDOWN — triggers a "3-2-1 GO" on both sides simultaneously.
+  // Feature Synclify doesn't have. Perfect for "let's start the movie together".
+  shadow.getElementById('countdown-btn').onclick = () => {
+    wsSend({ type: 'countdown' });
+    showCountdown(); // also fire locally
   };
 
   shadow.querySelectorAll('.rb').forEach(b => {

@@ -198,29 +198,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
 
     case 'iframe-video-event':
-      // auto-register iframe on first emit if not yet registered (fixes silent-drop bug
-      // when an iframe fires a play/pause/seek BEFORE its register-video-frame is processed)
+      // auto-register iframe on first emit if not yet registered
       if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
         if (videoFrames[senderTabId] === undefined) {
           videoFrames[senderTabId] = senderFrameId;
-          videoFrameDurations[senderTabId] = 1; // marker — real duration arrives on register
+          videoFrameDurations[senderTabId] = 1;
           if (senderFrameId !== 0) {
             chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
           }
           console.log('[daddys party] auto-registered iframe on first event:', senderFrameId);
         }
         if (videoFrames[senderTabId] === senderFrameId) {
-          console.log('[daddys party] →SEND playback', msg.action, '@', msg.currentTime?.toFixed(1));
-          ws.send(JSON.stringify({ type: 'playback', action: msg.action, currentTime: msg.currentTime }));
-        } else {
-          console.log('[daddys party] DROPPED iframe-video-event from non-winning iframe', senderFrameId, 'winner is', videoFrames[senderTabId]);
+          console.log('[daddys party] →SEND playback', msg.eventType, '@', msg.currentTime?.toFixed(1));
+          ws.send(JSON.stringify({
+            type: 'playback',
+            eventType: msg.eventType,
+            currentTime: msg.currentTime,
+            volume: msg.volume,
+            rate: msg.rate,
+          }));
         }
       }
       sendResponse({ ok: true }); break;
 
     case 'iframe-heartbeat':
-      // silent state-ping only (no host/joiner asymmetry — sync is event-driven now)
-      // Auto-register iframe on first heartbeat too — same race fix as above
       if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
         if (videoFrames[senderTabId] === undefined) {
           videoFrames[senderTabId] = senderFrameId;
@@ -234,8 +235,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             type: 'state-ping',
             action: msg.action,
             currentTime: msg.currentTime,
+            volume: msg.volume,
+            rate: msg.rate,
           }));
         }
+      }
+      sendResponse({ ok: true }); break;
+
+    case 'iframe-buffering':
+    case 'iframe-buffered':
+      // forward iframe buffering state to server as top-level buffering/buffered event
+      if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
+        const evtType = msg.type === 'iframe-buffering' ? 'buffering' : 'buffered';
+        ws.send(JSON.stringify({ type: evtType }));
       }
       sendResponse({ ok: true }); break;
 
@@ -376,8 +388,10 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
       if (vfid !== undefined && vfid !== 0) {
         chrome.tabs.sendMessage(activeTabId, {
           type: 'apply-playback',
-          action: data.action,
+          eventType: data.eventType || data.action,
           currentTime: data.currentTime,
+          volume: data.volume,
+          rate: data.rate,
         }, { frameId: vfid }).catch(() => {});
       }
     }
