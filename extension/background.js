@@ -8,8 +8,10 @@ let activeTabId   = null;     // tab where the party lives
 let lastMembers   = [];       // for restoring overlay after page navigation
 let lastState     = null;     // last known playback state {action, currentTime} for restoration
 let isHost        = false;    // were we the creator? need to preserve across nav
-let videoFrames   = {};       // tabId → frameId holding <video>
+let videoFrames   = {};       // tabId → frameId holding <video> (the PRIMARY/active one)
 let videoFrameDurations = {}; // tabId → duration of attached video (for picking best frame)
+let allVideoFrames = {};      // tabId → Set<frameId> of ALL iframes that registered video
+                              // (sync routes to ALL of them so multi-iframe sites work)
 let keepalivePorts = new Set();
 let lastServerUrl = null;     // remember for auto-reconnect
 let intentionalDisconnect = false; // set true on user-initiated disconnect
@@ -178,8 +180,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (senderTabId !== undefined) {
         const newDur = msg.duration || 0;
         const currentDur = videoFrameDurations[senderTabId] || 0;
-        // only pick this iframe if it has longer duration (= more likely the actual movie)
-        // or if we don't have one yet
+
+        // Track this frame in the all-iframes set so sync routes to it
+        if (!allVideoFrames[senderTabId]) allVideoFrames[senderTabId] = new Set();
+        allVideoFrames[senderTabId].add(senderFrameId);
+
+        // Primary frame is the one with longest duration (most likely the main movie)
         if (videoFrames[senderTabId] === undefined || newDur > currentDur) {
           videoFrames[senderTabId] = senderFrameId;
           videoFrameDurations[senderTabId] = newDur;
@@ -198,26 +204,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
 
     case 'iframe-video-event':
-      // auto-register iframe on first emit if not yet registered
+      // When an iframe emits a video event, it's a STRONG signal the user is
+      // actively interacting with THAT iframe — make it the registered video frame
+      // (override any previous registration). This solves the multi-iframe case
+      // where multiple iframes have videos but only one is visible/active: whichever
+      // one fires events from user actions becomes the sync target dynamically.
       if (senderTabId !== undefined && ws?.readyState === WebSocket.OPEN && roomId && roomId !== 'CONNECTING') {
-        if (videoFrames[senderTabId] === undefined) {
+        // Track in all-iframes set (sync will route here too)
+        if (!allVideoFrames[senderTabId]) allVideoFrames[senderTabId] = new Set();
+        allVideoFrames[senderTabId].add(senderFrameId);
+
+        // Promote to primary iframe — this is the one the user is actively using
+        if (videoFrames[senderTabId] !== senderFrameId) {
+          const oldFrame = videoFrames[senderTabId];
           videoFrames[senderTabId] = senderFrameId;
-          videoFrameDurations[senderTabId] = 1;
+          videoFrameDurations[senderTabId] = videoFrameDurations[senderTabId] || 1;
           if (senderFrameId !== 0) {
             chrome.tabs.sendMessage(senderTabId, { type: 'video-in-iframe', frameId: senderFrameId }, { frameId: 0 }).catch(() => {});
           }
-          console.log('[daddys party] auto-registered iframe on first event:', senderFrameId);
+          console.log(`[daddys party] active iframe → ${senderFrameId} (was ${oldFrame ?? 'none'})`);
+          chrome.tabs.sendMessage(senderTabId, {
+            type: 'iframe-debug',
+            text: `🎯 active video iframe is now: frame#${senderFrameId}`,
+          }, { frameId: 0 }).catch(() => {});
         }
-        if (videoFrames[senderTabId] === senderFrameId) {
-          console.log('[daddys party] →SEND playback', msg.eventType, '@', msg.currentTime?.toFixed(1));
-          ws.send(JSON.stringify({
-            type: 'playback',
-            eventType: msg.eventType,
-            currentTime: msg.currentTime,
-            volume: msg.volume,
-            rate: msg.rate,
-          }));
-        }
+        console.log('[daddys party] →SEND playback', msg.eventType, '@', msg.currentTime?.toFixed(1));
+        ws.send(JSON.stringify({
+          type: 'playback',
+          eventType: msg.eventType,
+          currentTime: msg.currentTime,
+          volume: msg.volume,
+          rate: msg.rate,
+        }));
       }
       sendResponse({ ok: true }); break;
 
@@ -397,17 +415,24 @@ function connectWS(serverUrl, action, rid, uname, attempt = 1) {
     // forward all server messages to the active tab's main frame (for overlay)
     notifyTab({ type: 'ws-msg', data });
 
-    // additionally: if video is in an iframe, send apply-playback directly to that iframe
+    // For playback events: route to ALL registered video iframes in the tab,
+    // not just the "primary" one. Solves the multi-iframe case where the user
+    // might be watching a different iframe than the one that registered first.
+    // Each frame's syntheticEventQueue suppresses its own echoes.
     if (data.type === 'playback' && activeTabId !== null) {
-      const vfid = videoFrames[activeTabId];
-      if (vfid !== undefined && vfid !== 0) {
-        chrome.tabs.sendMessage(activeTabId, {
-          type: 'apply-playback',
-          eventType: data.eventType || data.action,
-          currentTime: data.currentTime,
-          volume: data.volume,
-          rate: data.rate,
-        }, { frameId: vfid }).catch(() => {});
+      const frames = allVideoFrames[activeTabId];
+      const payload = {
+        type: 'apply-playback',
+        eventType: data.eventType || data.action,
+        currentTime: data.currentTime,
+        volume: data.volume,
+        rate: data.rate,
+      };
+      if (frames && frames.size > 0) {
+        for (const fid of frames) {
+          if (fid === 0) continue; // top frame already got it via notifyTab
+          chrome.tabs.sendMessage(activeTabId, payload, { frameId: fid }).catch(() => {});
+        }
       }
     }
   };
@@ -488,6 +513,8 @@ function notifyPopup(msg) {
 
 chrome.tabs.onRemoved.addListener(tabId => {
   delete videoFrames[tabId];
+  delete videoFrameDurations[tabId];
+  delete allVideoFrames[tabId];
   if (activeTabId === tabId) {
     disconnectWS();
   }
