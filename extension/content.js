@@ -695,12 +695,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       inRoom = false;
       setStatus('bad', 'disconnected — reopen extension');
       appendSys('disconnected 😭 open the extension to rejoin');
+      clearLogBuffer(); // log is per-party; cleared on disconnect (user should download first if they want it)
       break;
 
     case 'ws-disconnected-by-user':
       inRoom = false;
       hideOverlay();
       removePill();
+      clearLogBuffer();
       break;
 
     case 'video-in-iframe':
@@ -734,6 +736,7 @@ function handleServerMsg(msg) {
       countdownUsed = false; // fresh party, one countdown available again
       memberCount = 1; // just us so far
       clearChatLog(); // fresh party = fresh chat
+      clearLogBuffer(); // fresh party = fresh log
       overlaySetRoom(msg.roomId);
       setStatus('ok', 'connected — host');
       appendSys("you're in! 🎉 you're the HOST");
@@ -748,6 +751,7 @@ function handleServerMsg(msg) {
       countdownUsed = false; // tracked even though joiners can't trigger it
       memberCount = (msg.members?.length) || 2; // we joined so at least 2
       clearChatLog(); // fresh party = fresh chat
+      clearLogBuffer(); // fresh party = fresh log
       overlaySetRoom(msg.roomId);
       setStatus('ok', 'connected — joiner');
       updateCountdownButtonVisibility(); // joiner: never visible (not host)
@@ -797,9 +801,8 @@ function handleServerMsg(msg) {
       break;
     case 'peer-left':   appendSys(`${msg.username} ${pick(LEAVE_MSGS)}`); break;
     case 'version-mismatch':
-      appendSys(`⚠️ VERSION MISMATCH — ${msg.versions}`);
-      appendSys(`⚠️ older side won't have latest sync fixes! update at:`);
-      appendSys(`github.com/suyog-1/watchparty/releases/latest`);
+      appendCritical(`VERSION MISMATCH — ${msg.versions}`);
+      appendCritical(`update at github.com/suyog-1/watchparty/releases/latest`);
       setStatus('bad', '⚠ version mismatch — sync may break');
       break;
 
@@ -937,17 +940,20 @@ function doJumpscare(from, imageUrl) {
   const el = document.createElement('div');
   let duration;
   if (imageUrl) {
-    // Image scares: 1.4s total (was 2.8s — too long). Plain fade-in/hold/fade-out,
-    // no scale/shake (caused weird visual stretching). Black background instead of
-    // a random color so no awkward colored bars on either side of the image when its
-    // aspect ratio doesn't match the screen.
     duration = 1400;
     el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:#000;display:flex;align-items:center;justify-content:center;animation:__dp_img_scare ${duration}ms ease-out forwards;pointer-events:none;`;
     const img = document.createElement('img');
     img.src = imageUrl;
-    // object-fit:contain preserves aspect ratio — image scales to fit within 95vw/95vh
-    // without distortion. Bars on sides are black (matches background).
     img.style.cssText = 'max-width:95vw;max-height:95vh;width:auto;height:auto;object-fit:contain;display:block;';
+    // If the image data URL is broken/unsupported, gracefully fall back to emoji so
+    // the scare doesn't just blank out
+    img.onerror = () => {
+      img.remove();
+      el.style.background = e.color;
+      el.style.fontSize = '20vw';
+      el.style.animation = `__dp_flash 700ms ease-out forwards`;
+      el.textContent = e.emoji;
+    };
     el.appendChild(img);
     if (from) {
       const cap = document.createElement('div');
@@ -1092,14 +1098,16 @@ const OVERLAY_CSS = `
   #status-row.ok .dot{background:#4ade80}
   #status-row.bad .dot{background:#ef4444}
   #latency{font-size:.62rem;color:#664488;margin-left:4px}
-  #resync-btn, #countdown-btn, #restart-btn{
+  #resync-btn, #countdown-btn, #restart-btn, #log-btn{
     background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
     color:#bf5af2;font-size:.68rem;font-weight:700;padding:3px 8px;cursor:pointer;
   }
   #countdown-btn{margin-left:auto}
-  #resync-btn:hover, #countdown-btn:hover, #restart-btn:hover{background:#3d0080}
+  #resync-btn:hover, #countdown-btn:hover, #restart-btn:hover, #log-btn:hover{background:#3d0080}
   #restart-btn{background:#451a03;border-color:#ea580c40;color:#fb923c}
   #restart-btn:hover{background:#5e2509}
+  #log-btn{background:#0a1f2a;border-color:#0ea5e940;color:#38bdf8}
+  #log-btn:hover{background:#0e2a3a}
 
   #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0;flex-wrap:wrap}
   .rb{
@@ -1192,6 +1200,7 @@ function buildOverlay() {
           <button id="countdown-btn" title="3-2-1 countdown so you both start at the same instant">🎬 3-2-1</button>
           <button id="resync-btn" title="push your current playback position. if no video found, rescans all frames.">🔧 push</button>
           <button id="restart-btn" title="both sides go back to 0:00 and play together. works even if video hasn't loaded yet.">↺ restart</button>
+          <button id="log-btn" title="download the diagnostic log as a text file (cleared when party ends)">📥 log</button>
         </div>
         <div id="rxns">
           <button class="rb" data-e="❤️">❤️</button>
@@ -1312,6 +1321,17 @@ function wireOverlay() {
     updateCountdownButtonVisibility(); // hides the button
   };
 
+  // LOG DOWNLOAD — saves the accumulated diagnostic log to a text file.
+  // Chat panel only shows actual chat messages — all sync/diagnostic events
+  // are logged silently in memory. Download to inspect, then they're cleared on disconnect.
+  shadow.getElementById('log-btn').onclick = () => {
+    if (!logBuffer.length) {
+      appendCritical('log is empty');
+      return;
+    }
+    downloadLogFile();
+  };
+
   // Initial visibility check (handles case where overlay built mid-party after restore)
   updateCountdownButtonVisibility();
 
@@ -1319,16 +1339,20 @@ function wireOverlay() {
     b.onclick = () => wsSend({ type: 'reaction', emoji: b.dataset.e });
   });
 
-  // SCARE — 30s cooldown + optional custom image broadcast
+  // SCARE — 30s cooldown + ONE-SHOT custom image (each pic used once then discarded,
+  // forcing user to re-add if they want to scare with pics again. Once the queue is
+  // empty, scares fall back to the default emoji rotation.)
   shadow.getElementById('scare').onclick = () => {
-    if (scareCooldownRemaining() > 0) return; // gate (also button is disabled visually)
+    if (scareCooldownRemaining() > 0) return;
     lastScareAt = Date.now();
-    // pick a random custom image if user has any uploaded; otherwise undefined → receiver uses default emoji
-    const imageUrl = customScareImages.length > 0
-      ? customScareImages[Math.floor(Math.random() * customScareImages.length)]
-      : undefined;
+    let imageUrl;
+    if (customScareImages.length > 0) {
+      const idx = Math.floor(Math.random() * customScareImages.length);
+      imageUrl = customScareImages.splice(idx, 1)[0]; // POP — used exactly once
+      saveCustomScareImages();
+    }
     wsSend({ type: 'jumpscare', imageUrl });
-    updateScareButtonLabel(); // immediately reflect cooldown in the UI
+    updateScareButtonLabel(); // updates count + shows cooldown
   };
 
   // SCARE IMAGE UPLOAD
@@ -1530,8 +1554,54 @@ function updateCountdownButtonVisibility() {
   btn.style.display = visible ? '' : 'none';
 }
 
-function appendChat(who, text) { if (shadow) append(false, who, text); }
-function appendSys(text)       { if (shadow) append(true,  '•',  text); }
+// ── LOG BUFFER ───────────────────────────────────────────────────────────────
+// All system/diagnostic messages go HERE instead of into the chat panel.
+// User can download as a text file via the 📥 button. Cleared on disconnect.
+// Chat messages and gifs ALSO get logged so the file is a full transcript.
+let logBuffer = [];
+function logLine(text) {
+  logBuffer.push({ t: Date.now(), text });
+  // cap at 5000 lines so memory doesn't grow unbounded over a long party
+  if (logBuffer.length > 5000) logBuffer.splice(0, logBuffer.length - 5000);
+}
+
+function downloadLogFile() {
+  if (!logBuffer.length) return;
+  const pad = (n) => String(n).padStart(2, '0');
+  const fmtTime = (ms) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+  const text = logBuffer.map(e => `[${fmtTime(e.t)}] ${e.text}`).join('\n');
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const now = new Date();
+  a.download = `daddys-party-log-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+}
+
+function clearLogBuffer() { logBuffer = []; }
+
+// ── CHAT/LOG WRITERS ─────────────────────────────────────────────────────────
+// appendChat / appendGif: visible in chat panel AND logged
+// appendSys: LOGGED ONLY (not shown in chat — keeps chat minimal)
+// appendCritical: like appendSys but ALSO shown in chat (for warnings user must see)
+function appendChat(who, text) {
+  logLine(`CHAT ${who}: ${text}`);
+  if (shadow) append(false, who, text);
+}
+function appendSys(text) {
+  logLine(text);
+  // intentionally NOT displayed in chat — see download button to retrieve
+}
+function appendCritical(text) {
+  logLine(`! ${text}`);
+  if (shadow) append(true, '⚠', text);
+}
 
 function clearChatLog() {
   if (!shadow) return;
@@ -1540,6 +1610,7 @@ function clearChatLog() {
 }
 
 function appendGif(who, url) {
+  logLine(`GIF ${who}: ${url}`);
   if (!shadow) return;
   if (shadow.host.style.display === 'none') showOverlay();
   const log = shadow.getElementById('log');
