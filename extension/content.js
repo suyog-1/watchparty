@@ -140,10 +140,13 @@ function attachVideo(video) {
   detachVideo();
   videoEl = video;
 
-  // Attach ONE handler to every synced event type. The handler is identical:
-  // if syntheticEventQueue has this type queued, consume + suppress. Otherwise broadcast.
+  // Attach ONE handler to every synced event type. Bubble phase (NOT capture) +
+  // no stopImmediatePropagation, so the site's own listeners (e.g. YouTube's play-button
+  // UI update) still run normally. We just observe and decide whether to broadcast.
+  // Capture phase + stopImmediatePropagation broke bidirectional pause/resume —
+  // YouTube's UI got out of sync with the actual paused state, button stopped working.
   for (const evt of SYNCED_VIDEO_EVENTS) {
-    video.addEventListener(evt, onSyncedVideoEvent, true); // capture phase, run before site listeners
+    video.addEventListener(evt, onSyncedVideoEvent, false);
   }
 
   // Re-register if duration becomes known later (initial duration is often NaN/0)
@@ -191,7 +194,7 @@ function applyPendingPlayback() {
 function detachVideo() {
   if (!videoEl) return;
   for (const evt of SYNCED_VIDEO_EVENTS) {
-    videoEl.removeEventListener(evt, onSyncedVideoEvent, true);
+    videoEl.removeEventListener(evt, onSyncedVideoEvent, false);
   }
   videoEl.removeEventListener('waiting', onBuffering);
   videoEl.removeEventListener('playing', onBufferResolved);
@@ -200,13 +203,16 @@ function detachVideo() {
 }
 
 // THE CORE: one handler for all video events. Synclify-style suppression via
-// per-event-type queue instead of timer-based windows. Bulletproof.
+// per-event-type queue. If a synthetic event (one WE caused), silently swallow
+// it (don't broadcast) — but DO let the site's own listeners run normally,
+// otherwise the player UI gets out of sync with the actual paused state.
 function onSyncedVideoEvent(e) {
   // Skip preview/ad videos in any frame
   if (videoEl && isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.duration < 60) return;
 
   if (shouldSuppressEvent(e.type)) {
-    e.stopImmediatePropagation();
+    // synthetic — site's listeners already ran (or will run, since we're in bubble
+    // phase) and updated their UI correctly. We just don't broadcast.
     return;
   }
   if (IS_TOP && !inRoom) return;
@@ -922,34 +928,30 @@ function resizeImageToDataUrl(file, maxSize = 400, quality = 0.72) {
 function doJumpscare(from, imageUrl) {
   const e = SCARE_EFFECTS[Math.floor(Math.random() * SCARE_EFFECTS.length)];
   const s = document.createElement('style');
-  // emoji uses fast flash/shake (0.7s) for impact.
-  // image uses long display (2.8s) with a brief shake at start so the picture is actually viewable.
   s.textContent = `
     @keyframes __dp_flash{0%{opacity:1}100%{opacity:0}}
     @keyframes __dp_shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-30px)}75%{transform:translateX(30px)}}
-    @keyframes __dp_img_scare{
-      0%   { opacity:0; transform:scale(1.3) translateX(0); }
-      4%   { opacity:1; transform:scale(1.05) translateX(-25px); }
-      8%   { transform:scale(1.05) translateX(25px); }
-      12%  { transform:scale(1) translateX(0); }
-      88%  { opacity:1; transform:scale(1) translateX(0); }
-      100% { opacity:0; transform:scale(1.08) translateX(0); }
-    }
+    @keyframes __dp_img_scare{0%{opacity:0}10%{opacity:1}85%{opacity:1}100%{opacity:0}}
   `;
   document.head.appendChild(s);
   const el = document.createElement('div');
   let duration;
   if (imageUrl) {
-    duration = 2800;
-    el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;animation:__dp_img_scare ${duration}ms cubic-bezier(.2,.7,.2,1) forwards;pointer-events:none;`;
+    // Image scares: 1.4s total (was 2.8s — too long). Plain fade-in/hold/fade-out,
+    // no scale/shake (caused weird visual stretching). Black background instead of
+    // a random color so no awkward colored bars on either side of the image when its
+    // aspect ratio doesn't match the screen.
+    duration = 1400;
+    el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:#000;display:flex;align-items:center;justify-content:center;animation:__dp_img_scare ${duration}ms ease-out forwards;pointer-events:none;`;
     const img = document.createElement('img');
     img.src = imageUrl;
-    img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;box-shadow:0 0 80px #000c;';
+    // object-fit:contain preserves aspect ratio — image scales to fit within 95vw/95vh
+    // without distortion. Bars on sides are black (matches background).
+    img.style.cssText = 'max-width:95vw;max-height:95vh;width:auto;height:auto;object-fit:contain;display:block;';
     el.appendChild(img);
-    // small caption showing who sent it (only for image scares — emoji scares are too fast)
     if (from) {
       const cap = document.createElement('div');
-      cap.style.cssText = 'position:absolute;bottom:6vh;left:50%;transform:translateX(-50%);font-family:system-ui,sans-serif;font-size:1.2rem;font-weight:800;color:#fff;text-shadow:0 2px 12px #000;background:rgba(0,0,0,.4);padding:6px 16px;border-radius:999px;';
+      cap.style.cssText = 'position:absolute;bottom:4vh;left:50%;transform:translateX(-50%);font-family:system-ui,sans-serif;font-size:.95rem;font-weight:700;color:#fff;text-shadow:0 2px 12px #000;background:rgba(0,0,0,.5);padding:5px 14px;border-radius:999px;';
       cap.textContent = `from ${from}`;
       el.appendChild(cap);
     }
@@ -960,7 +962,6 @@ function doJumpscare(from, imageUrl) {
     el.textContent = e.emoji;
   }
   (document.fullscreenElement || document.body).appendChild(el);
-  // animationend doesn't always fire reliably across animations; safety timeout cleans up
   const cleanup = () => { try { el.remove(); s.remove(); } catch (_) {} };
   el.addEventListener('animationend', cleanup);
   setTimeout(cleanup, duration + 300);
