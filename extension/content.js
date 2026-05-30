@@ -450,7 +450,13 @@ setInterval(() => {
     if (heartbeatLoggedNoVideo === 5) {
       const count = document.querySelectorAll('video').length;
       const iframes = document.querySelectorAll('iframe').length;
-      appendSys(`⚠️ top frame: ${count} <video>, ${iframes} <iframe>`);
+      appendSys(`⚠️ no video found yet. top frame: ${count} <video>, ${iframes} <iframe>`);
+      if (iframes > 0) {
+        appendSys(`💡 try: click the play button in the video player area, then wait 3s`);
+        appendSys(`💡 if still nothing: the player iframe might be sandboxed (we can't reach it)`);
+      } else {
+        appendSys(`💡 site has no iframes either — the video may load only after you click play`);
+      }
       pollForVideo();
     }
     return;
@@ -884,25 +890,48 @@ function resizeImageToDataUrl(file, maxSize = 400, quality = 0.72) {
 function doJumpscare(from, imageUrl) {
   const e = SCARE_EFFECTS[Math.floor(Math.random() * SCARE_EFFECTS.length)];
   const s = document.createElement('style');
+  // emoji uses fast flash/shake (0.7s) for impact.
+  // image uses long display (2.8s) with a brief shake at start so the picture is actually viewable.
   s.textContent = `
     @keyframes __dp_flash{0%{opacity:1}100%{opacity:0}}
     @keyframes __dp_shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-30px)}75%{transform:translateX(30px)}}
+    @keyframes __dp_img_scare{
+      0%   { opacity:0; transform:scale(1.3) translateX(0); }
+      4%   { opacity:1; transform:scale(1.05) translateX(-25px); }
+      8%   { transform:scale(1.05) translateX(25px); }
+      12%  { transform:scale(1) translateX(0); }
+      88%  { opacity:1; transform:scale(1) translateX(0); }
+      100% { opacity:0; transform:scale(1.08) translateX(0); }
+    }
   `;
   document.head.appendChild(s);
   const el = document.createElement('div');
-  const animName = e.anim === 'shake' ? '__dp_shake' : '__dp_flash';
-  el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;animation:${animName} .7s ease-out forwards;pointer-events:none;`;
+  let duration;
   if (imageUrl) {
+    duration = 2800;
+    el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;animation:__dp_img_scare ${duration}ms cubic-bezier(.2,.7,.2,1) forwards;pointer-events:none;`;
     const img = document.createElement('img');
     img.src = imageUrl;
-    img.style.cssText = 'max-width:80vw;max-height:80vh;object-fit:contain;';
+    img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;box-shadow:0 0 80px #000c;';
     el.appendChild(img);
+    // small caption showing who sent it (only for image scares — emoji scares are too fast)
+    if (from) {
+      const cap = document.createElement('div');
+      cap.style.cssText = 'position:absolute;bottom:6vh;left:50%;transform:translateX(-50%);font-family:system-ui,sans-serif;font-size:1.2rem;font-weight:800;color:#fff;text-shadow:0 2px 12px #000;background:rgba(0,0,0,.4);padding:6px 16px;border-radius:999px;';
+      cap.textContent = `from ${from}`;
+      el.appendChild(cap);
+    }
   } else {
-    el.style.fontSize = '20vw';
+    duration = 700;
+    const animName = e.anim === 'shake' ? '__dp_shake' : '__dp_flash';
+    el.style.cssText = `position:fixed;inset:0;z-index:2147483646;background:${e.color};display:flex;align-items:center;justify-content:center;animation:${animName} ${duration}ms ease-out forwards;pointer-events:none;font-size:20vw;`;
     el.textContent = e.emoji;
   }
-  document.body.appendChild(el);
-  el.addEventListener('animationend', () => { el.remove(); s.remove(); });
+  (document.fullscreenElement || document.body).appendChild(el);
+  // animationend doesn't always fire reliably across animations; safety timeout cleans up
+  const cleanup = () => { try { el.remove(); s.remove(); } catch (_) {} };
+  el.addEventListener('animationend', cleanup);
+  setTimeout(cleanup, duration + 300);
 }
 
 // Get the most recent scare cooldown remaining (in ms). 0 if ready.
@@ -1037,7 +1066,7 @@ const OVERLAY_CSS = `
   #resync-btn{margin-left:auto}
   #resync-btn:hover, #countdown-btn:hover{background:#3d0080}
 
-  #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0}
+  #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0;flex-wrap:wrap}
   .rb{
     background:none;border:1px solid #ffffff15;border-radius:7px;
     font-size:1rem;padding:3px 7px;cursor:pointer;
@@ -1054,11 +1083,12 @@ const OVERLAY_CSS = `
   #scare:hover:not(:disabled){transform:scale(1.06)}
   #scare:disabled{cursor:not-allowed}
   #scare-upload{
-    background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
-    color:#bf5af2;font-size:.7rem;font-weight:700;padding:4px 7px;
-    cursor:pointer;transition:background .12s;white-space:nowrap;
+    background:linear-gradient(135deg,#5b21b6,#7c3aed);
+    border:1px solid #bf5af280;border-radius:7px;
+    color:#fff;font-size:.68rem;font-weight:700;padding:4px 9px;
+    cursor:pointer;transition:transform .12s,background .12s;white-space:nowrap;
   }
-  #scare-upload:hover{background:#3d0080}
+  #scare-upload:hover{transform:scale(1.06);background:linear-gradient(135deg,#6d28d9,#8b5cf6)}
 
   #gifpanel{display:none;flex-direction:column;gap:7px;padding:9px 12px;border-top:1px solid #ffffff08}
   #gifpanel.open{display:flex}
@@ -1135,7 +1165,7 @@ function buildOverlay() {
           <button class="rb" data-e="🍿">🍿</button>
           <button class="rb" data-e="💀">💀</button>
           <button id="scare">😈 scare</button>
-          <button id="scare-upload" title="upload custom scare images (jpg/png)">📷+</button>
+          <button id="scare-upload" title="upload custom scare images (jpg/png). Right-click to clear.">📷 add pics</button>
           <input id="scare-file-input" type="file" accept="image/*" multiple style="display:none" />
         </div>
         <div id="gifpanel">
