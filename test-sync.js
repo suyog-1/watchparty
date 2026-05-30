@@ -7,7 +7,7 @@
 const WebSocket = require('ws');
 
 const SERVER = process.argv[2] || 'ws://localhost:3000';
-const VERSION = '2.1.0';
+const VERSION = '2.1.7';
 
 let passed = 0, failed = 0;
 const results = [];
@@ -185,6 +185,40 @@ async function runTests() {
     if (pong.t !== sentAt) throw new Error(`pong t mismatch: ${pong.t} vs ${sentAt}`);
     pass(`sync-ping echoed back as sync-pong with original timestamp (RTT measurable)`);
   } catch (e) { fail('sync-ping', e.message); }
+
+  // ── TEST 2f: action broadcast (v2.1.7 — button-press notifications) ───
+  console.log('\nTEST 2f: action message (v2.1.7 — broadcastAll like chat)');
+  try {
+    send(host, { type: 'action', text: '🔧 pushed sync' });
+    // joiner should receive it
+    const j = await waitFor(joiner, m => m.type === 'action', 3000, 'action on joiner');
+    if (j.username !== 'host') throw new Error(`wrong sender: ${j.username}`);
+    if (j.text !== '🔧 pushed sync') throw new Error(`wrong text: ${j.text}`);
+    pass(`joiner received action from ${j.username}: "${j.text}"`);
+    // host should also receive it (broadcastAll, like chat)
+    const h = await waitFor(host, m => m.type === 'action', 3000, 'action loopback');
+    if (h.text !== '🔧 pushed sync') throw new Error(`loopback text mismatch`);
+    pass(`host received their own action back (broadcastAll loopback works)`);
+
+    // size cap: huge text gets truncated to 200 chars
+    const huge = 'x'.repeat(500);
+    send(host, { type: 'action', text: huge });
+    const capped = await waitFor(joiner, m => m.type === 'action' && m.text.startsWith('x'), 3000, 'huge action');
+    if (capped.text.length > 200) throw new Error(`oversized action not capped: ${capped.text.length} chars`);
+    pass(`oversized action text correctly capped at 200 chars`);
+  } catch (e) { fail('action broadcast', e.message); }
+
+  // ── TEST 2g: remote-rescan (v2.1.7 — restart can trigger partner's rescan) ───
+  console.log('\nTEST 2g: remote-rescan (v2.1.7 — broadcast except sender)');
+  try {
+    send(host, { type: 'remote-rescan' });
+    const r = await waitFor(joiner, m => m.type === 'remote-rescan', 3000, 'remote-rescan');
+    pass(`joiner received remote-rescan from host`);
+    // sender should NOT receive their own remote-rescan back
+    const echoed = await collectFor(host, m => m.type === 'remote-rescan', 500);
+    if (echoed.length > 0) throw new Error(`remote-rescan echoed to sender ${echoed.length} times`);
+    pass(`remote-rescan does NOT echo back to sender (broadcast-except-sender)`);
+  } catch (e) { fail('remote-rescan', e.message); }
 
   // ── TEST 2e: jumpscare imageUrl forwarding (v2.1 feature) ─────────────
   console.log('\nTEST 2e: jumpscare with custom imageUrl (v2.1 feature)');

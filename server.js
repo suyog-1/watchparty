@@ -166,6 +166,26 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'action': {
+        // visible "X pushed sync" / "X restarted sync" notifications — broadcastAll
+        // so the clicker sees their own action confirmed in chat too
+        if (!roomId || !rooms[roomId]) return;
+        const username = rooms[roomId].members.get(ws)?.username || 'someone';
+        // size cap: text up to 200 chars so a buggy/malicious client can't flood
+        const text = typeof msg.text === 'string' ? msg.text.slice(0, 200) : '';
+        if (!text) return;
+        broadcastAll(roomId, { type: 'action', username, text });
+        break;
+      }
+
+      case 'remote-rescan': {
+        // a member's restart button wants the OTHER members to also rescan
+        // their tab's video iframes (in case video loaded late on their end too)
+        if (!roomId || !rooms[roomId]) return;
+        broadcast(roomId, { type: 'remote-rescan' }, ws);
+        break;
+      }
+
       case 'chat': {
         if (!roomId || !rooms[roomId]) return;
         const username = rooms[roomId].members.get(ws)?.username || 'someone';

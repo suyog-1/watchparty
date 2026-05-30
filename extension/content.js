@@ -918,6 +918,19 @@ function handleServerMsgInner(msg) {
       showCountdown(msg.from);
       break;
     }
+
+    case 'action': {
+      // X pressed a button — visible in chat on both sides
+      appendActionChat(msg.username, msg.text);
+      break;
+    }
+
+    case 'remote-rescan': {
+      // Partner clicked restart — they want us to rescan our iframes too
+      // (in case our video also loaded late). Same as if WE clicked push locally.
+      safeSendMessage({ type: 'broadcast-rescan' });
+      break;
+    }
     case 'chat':       appendChat(msg.username, msg.text); break;
     case 'gif':        appendGif(msg.username, msg.url);  break;
     case 'reaction':   popReaction(msg.emoji); appendSys(`${msg.username} ${msg.emoji}`); break;
@@ -1328,49 +1341,56 @@ function wireOverlay() {
 
   // FORCE PUSH SYNC — emits current playback state. If no local video, triggers
   // an active rescan across ALL frames in case the video loaded after initial detect.
+  // Also broadcasts an 'action' notification so BOTH sides see "X pushed sync".
   shadow.getElementById('resync-btn').onclick = () => {
     if (!videoEl) {
       const v = findVideo();
       if (v) attachVideo(v);
     }
     if (videoEl) {
-      const payload = {
+      const eventType = videoEl.paused ? 'pause' : 'play';
+      const t = videoEl.currentTime.toFixed(0);
+      wsSend({
         type: 'playback',
-        eventType: videoEl.paused ? 'pause' : 'play',
+        eventType,
         currentTime: videoEl.currentTime,
         volume: videoEl.volume,
         rate: videoEl.playbackRate,
-      };
-      wsSend(payload);
-      appendSys(`🔧 forced push: ${payload.eventType} @ ${payload.currentTime.toFixed(0)}s`);
+      });
+      wsSend({ type: 'action', text: `🔧 pushed sync (${eventType} @ ${t}s)` });
     } else {
-      appendSys('🔧 no local video — rescanning all frames…');
-      // Ask background to broadcast a rescan to every frame in this tab.
-      // Each frame re-runs findVideo() right now, reports back what it sees.
       safeSendMessage({ type: 'request-iframe-push' });
       safeSendMessage({ type: 'broadcast-rescan' });
+      wsSend({ type: 'action', text: '🔧 pushed sync (no local video — rescanning)' });
     }
   };
 
-  // RESTART FROM 0 — both sides seek to 0 and play. Works even if video isn't loaded
-  // yet (uses pendingPlayback queue, applies the moment the video attaches).
+  // RESTART SYNC — refreshes the sync process WITHOUT touching either video's
+  // playback position. Triggers a fresh iframe rescan on BOTH sides (in case
+  // either side's video loaded late), then re-pushes the clicker's current state
+  // so partner can re-align. Does NOT seek to 0 — that was the old broken behavior
+  // that "restarted the whole movie for the other person."
   shadow.getElementById('restart-btn').onclick = () => {
-    appendSys('↺ restart requested — both sides going to 0:00');
-    // Local: queue so it applies whenever the video shows up
-    const restartEvt = { eventType: 'seeked', currentTime: 0, volume: undefined, rate: undefined };
-    if (videoEl) {
-      suppressNext('seeked');
-      videoEl.currentTime = 0;
-      suppressNext('play');
-      videoEl.play().catch(() => { autoplayBlocked = true; showAutoplayBanner(); });
-    } else {
-      pendingPlayback = { eventType: 'play', currentTime: 0 };
-    }
-    // Tell partner — they'll do the same
-    wsSend({ type: 'playback', eventType: 'seeked', currentTime: 0 });
-    setTimeout(() => wsSend({ type: 'playback', eventType: 'play', currentTime: 0 }), 200);
-    // Also rescan in case our video hasn't loaded yet
+    // Visible notification to both sides
+    wsSend({ type: 'action', text: '↺ refreshed sync' });
+    // Rescan our own iframes (catches videos that loaded after initial detection)
     safeSendMessage({ type: 'broadcast-rescan' });
+    // Tell partner to rescan their iframes too
+    wsSend({ type: 'remote-rescan' });
+    // Re-push our current state so partner aligns to where WE are
+    setTimeout(() => {
+      if (videoEl) {
+        wsSend({
+          type: 'playback',
+          eventType: videoEl.paused ? 'pause' : 'play',
+          currentTime: videoEl.currentTime,
+          volume: videoEl.volume,
+          rate: videoEl.playbackRate,
+        });
+      } else {
+        safeSendMessage({ type: 'request-iframe-push' });
+      }
+    }, 400);
   };
 
   // COUNTDOWN — host-only, one-shot per party. Hides after click to prevent spam.
@@ -1631,6 +1651,14 @@ function appendSys(text) {
 function appendCritical(text) {
   logLine(`! ${text}`);
   if (shadow) append(true, '⚠', text);
+}
+
+// User-action notifications (push, restart, etc.) — visible in chat so partner
+// knows when a button was pressed. Shown with system style (small italic) so it
+// reads as "X did this" rather than as a chat message.
+function appendActionChat(who, text) {
+  logLine(`ACTION ${who}: ${text}`);
+  if (shadow) append(true, who, text);
 }
 
 function clearChatLog() {
