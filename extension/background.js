@@ -288,6 +288,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true }); break;
     }
 
+    case 'broadcast-rescan': {
+      // Tell EVERY frame in the active tab to immediately re-run findVideo()
+      // and report back what they see. Used by the push and restart buttons when
+      // the video may have loaded after our initial detection passed.
+      if (senderTabId !== undefined) {
+        chrome.webNavigation.getAllFrames({ tabId: senderTabId }, (frames) => {
+          if (!frames) return;
+          for (const f of frames) {
+            chrome.tabs.sendMessage(senderTabId, { type: 'force-rescan' }, { frameId: f.frameId }).catch(() => {});
+          }
+        });
+      }
+      sendResponse({ ok: true }); break;
+    }
+
     // misc
     case 'focus-tab':
       if (msg.tabId) chrome.tabs.update(msg.tabId, { active: true }).catch(() => {});

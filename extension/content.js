@@ -614,6 +614,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // background broadcast a rescan request — re-run findVideo() in this frame right now
+  // and report the result back to top frame's chat so user knows what we see
+  if (msg.type === 'force-rescan') {
+    const v = findVideo();
+    const videoCount = document.querySelectorAll('video').length;
+    const iframeCount = document.querySelectorAll('iframe').length;
+    const url = (location.href || '').slice(0, 60) || '(top frame)';
+    if (v && v !== videoEl) {
+      attachVideo(v);
+      const text = IS_TOP
+        ? `✓ rescan: video found in top frame!`
+        : `✓ rescan: video found in iframe ${url}`;
+      if (IS_TOP) appendSys(text);
+      else safeSendMessage({ type: 'iframe-debug', text });
+    } else if (v) {
+      // already attached, no change
+      const text = IS_TOP ? `✓ rescan: video already attached (top)` : `✓ rescan: video already attached (${url})`;
+      if (IS_TOP) appendSys(text);
+      else safeSendMessage({ type: 'iframe-debug', text });
+    } else {
+      const text = IS_TOP
+        ? `rescan: top frame has ${videoCount} <video>, ${iframeCount} <iframe>`
+        : `rescan: ${url}: ${videoCount} <video>, ${iframeCount} <iframe>`;
+      if (IS_TOP) appendSys(text);
+      else safeSendMessage({ type: 'iframe-debug', text });
+      // also restart polling in case the video appears soon
+      if (!videoEl) pollForVideo();
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
   // top frame asked iframe to push its current playback state (force-resync button)
   if (msg.type === 'force-emit-state' && !IS_TOP) {
     if (videoEl) {
@@ -1059,12 +1091,14 @@ const OVERLAY_CSS = `
   #status-row.ok .dot{background:#4ade80}
   #status-row.bad .dot{background:#ef4444}
   #latency{font-size:.62rem;color:#664488;margin-left:4px}
-  #resync-btn, #countdown-btn{
+  #resync-btn, #countdown-btn, #restart-btn{
     background:#2d0060;border:1px solid #bf5af240;border-radius:6px;
     color:#bf5af2;font-size:.68rem;font-weight:700;padding:3px 8px;cursor:pointer;
   }
-  #resync-btn{margin-left:auto}
-  #resync-btn:hover, #countdown-btn:hover{background:#3d0080}
+  #countdown-btn{margin-left:auto}
+  #resync-btn:hover, #countdown-btn:hover, #restart-btn:hover{background:#3d0080}
+  #restart-btn{background:#451a03;border-color:#ea580c40;color:#fb923c}
+  #restart-btn:hover{background:#5e2509}
 
   #rxns{display:flex;align-items:center;gap:4px;padding:7px 12px;border-top:1px solid #ffffff08;flex-shrink:0;flex-wrap:wrap}
   .rb{
@@ -1155,7 +1189,8 @@ function buildOverlay() {
           <span id="status-text">checking…</span>
           <span id="latency"></span>
           <button id="countdown-btn" title="3-2-1 countdown so you both start at the same instant">🎬 3-2-1</button>
-          <button id="resync-btn" title="push your current playback position to your partner">🔧 push</button>
+          <button id="resync-btn" title="push your current playback position. if no video found, rescans all frames.">🔧 push</button>
+          <button id="restart-btn" title="both sides go back to 0:00 and play together. works even if video hasn't loaded yet.">↺ restart</button>
         </div>
         <div id="rxns">
           <button class="rb" data-e="❤️">❤️</button>
@@ -1220,7 +1255,8 @@ function wireOverlay() {
     });
   };
 
-  // FORCE PUSH SYNC — emits current playback state immediately. Escape hatch.
+  // FORCE PUSH SYNC — emits current playback state. If no local video, triggers
+  // an active rescan across ALL frames in case the video loaded after initial detect.
   shadow.getElementById('resync-btn').onclick = () => {
     if (!videoEl) {
       const v = findVideo();
@@ -1234,13 +1270,36 @@ function wireOverlay() {
         volume: videoEl.volume,
         rate: videoEl.playbackRate,
       };
-      if (IS_TOP) wsSend(payload);
-      else safeSendMessage({ type: 'iframe-video-event', ...payload });
+      wsSend(payload);
       appendSys(`🔧 forced push: ${payload.eventType} @ ${payload.currentTime.toFixed(0)}s`);
     } else {
-      appendSys('🔧 push requested — checking iframes…');
+      appendSys('🔧 no local video — rescanning all frames…');
+      // Ask background to broadcast a rescan to every frame in this tab.
+      // Each frame re-runs findVideo() right now, reports back what it sees.
       safeSendMessage({ type: 'request-iframe-push' });
+      safeSendMessage({ type: 'broadcast-rescan' });
     }
+  };
+
+  // RESTART FROM 0 — both sides seek to 0 and play. Works even if video isn't loaded
+  // yet (uses pendingPlayback queue, applies the moment the video attaches).
+  shadow.getElementById('restart-btn').onclick = () => {
+    appendSys('↺ restart requested — both sides going to 0:00');
+    // Local: queue so it applies whenever the video shows up
+    const restartEvt = { eventType: 'seeked', currentTime: 0, volume: undefined, rate: undefined };
+    if (videoEl) {
+      suppressNext('seeked');
+      videoEl.currentTime = 0;
+      suppressNext('play');
+      videoEl.play().catch(() => { autoplayBlocked = true; showAutoplayBanner(); });
+    } else {
+      pendingPlayback = { eventType: 'play', currentTime: 0 };
+    }
+    // Tell partner — they'll do the same
+    wsSend({ type: 'playback', eventType: 'seeked', currentTime: 0 });
+    setTimeout(() => wsSend({ type: 'playback', eventType: 'play', currentTime: 0 }), 200);
+    // Also rescan in case our video hasn't loaded yet
+    safeSendMessage({ type: 'broadcast-rescan' });
   };
 
   // COUNTDOWN — host-only, one-shot per party. Hides after click to prevent spam.
@@ -1278,25 +1337,40 @@ function wireOverlay() {
     const files = [...(e.target.files || [])];
     if (!files.length) return;
     appendSys(`📷 processing ${files.length} image${files.length > 1 ? 's' : ''}…`);
+    let added = 0, skipped = 0;
     for (const f of files) {
+      // HEIC/HEIF — Apple's format that Chrome can't decode natively
+      if (f.type === 'image/heic' || f.type === 'image/heif' || /\.(heic|heif)$/i.test(f.name)) {
+        appendSys(`⚠️ ${f.name} is HEIC (iPhone format) — convert to JPG first. Photos app → Share → "Save to Files" usually exports JPG.`);
+        skipped++;
+        continue;
+      }
+      // Anything other than image/*
+      if (!f.type.startsWith('image/')) {
+        appendSys(`⚠️ ${f.name} isn't an image — skipped`);
+        skipped++;
+        continue;
+      }
       try {
         const dataUrl = await resizeImageToDataUrl(f, 400, 0.72);
-        // safety cap: ~150KB per image (data URLs are ~33% bigger than raw bytes)
         if (dataUrl.length > 200_000) {
           appendSys(`⚠️ ${f.name} too big after resize — skipped`);
+          skipped++;
           continue;
         }
         customScareImages.push(dataUrl);
+        added++;
       } catch (err) {
-        appendSys(`⚠️ couldn't read ${f.name}`);
+        appendSys(`⚠️ couldn't read ${f.name} (${err?.message || 'unknown error'})`);
+        skipped++;
       }
     }
-    // cap total images at 20 so chrome.storage.local doesn't bloat
     if (customScareImages.length > 20) customScareImages = customScareImages.slice(-20);
     saveCustomScareImages();
     updateScareButtonLabel();
-    appendSys(`✓ ${customScareImages.length} scare image${customScareImages.length === 1 ? '' : 's'} ready`);
-    fileInput.value = ''; // allow re-uploading the same file
+    if (added > 0) appendSys(`✓ added ${added} — ${customScareImages.length} scare image${customScareImages.length === 1 ? '' : 's'} total`);
+    else if (skipped > 0) appendSys(`✗ no images added (${skipped} skipped). total: ${customScareImages.length}`);
+    fileInput.value = '';
   });
   // right-click on upload button to clear all custom images
   shadow.getElementById('scare-upload').oncontextmenu = (e) => {
