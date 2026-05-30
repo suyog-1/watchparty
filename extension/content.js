@@ -11,6 +11,35 @@ if (window.__daddysparty_v3__) {
 const IS_TOP = window === window.top;
 const TENOR_KEY = 'LIVDSRZULELA';
 
+// ── LOG BUFFER (declared early so all logging functions have it available) ──
+// All system/diagnostic messages go HERE instead of into the chat panel.
+// User can download as a text file via the 📥 button. Cleared on disconnect.
+// Chat messages and gifs ALSO get logged so the file is a full transcript.
+let logBuffer = [];
+function logLine(text) {
+  logBuffer.push({ t: Date.now(), text });
+  if (logBuffer.length > 5000) logBuffer.splice(0, logBuffer.length - 5000);
+}
+function downloadLogFile() {
+  if (!logBuffer.length) return;
+  const pad = (n) => String(n).padStart(2, '0');
+  const fmtTime = (ms) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+  const text = logBuffer.map(e => `[${fmtTime(e.t)}] ${e.text}`).join('\n');
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const now = new Date();
+  a.download = `daddys-party-log-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+}
+function clearLogBuffer() { logBuffer = []; }
+
 // Returns true if our extension context is still valid (not invalidated by reload)
 function extContextValid() {
   try { return !!chrome?.runtime?.id; } catch { return false; }
@@ -548,7 +577,14 @@ if (IS_TOP) {
       overlaySetRoom(res.roomId);
       if (res.members) overlaySetMembers(res.members);
       if (res.state) {
-        pendingPlayback = { action: res.state.action, currentTime: res.state.currentTime };
+        // v2.0 uses eventType, not action. The restored state from background can
+        // be either format — normalize. play/pause/seeked all map to themselves.
+        pendingPlayback = {
+          eventType: res.state.eventType || res.state.action,
+          currentTime: res.state.currentTime,
+          volume: res.state.volume,
+          rate: res.state.rate,
+        };
       }
       appendSys('reconnected — catching up 🎬');
       attachVideoOrPoll();
@@ -568,6 +604,20 @@ function wsSend(payload) {
 console.log("[daddy's party 🎬] content script loaded on", location.href);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  try {
+    return handleMessage(msg, sender, sendResponse);
+  } catch (err) {
+    // Don't let a thrown error kill the message listener. Log it for debugging.
+    try {
+      logLine(`[ERR] message handler threw on type=${msg?.type}: ${err?.message || err}`);
+      console.error('[daddys party] message handler error:', err, 'msg:', msg);
+    } catch (_) {}
+    try { sendResponse({ ok: false, error: String(err) }); } catch (_) {}
+    return true;
+  }
+});
+
+function handleMessage(msg, sender, sendResponse) {
   // ping handler — popup uses this to verify content script is loaded
   if (msg.type === 'ping') {
     sendResponse({ pong: true, version: 3 });
@@ -719,7 +769,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       break;
   }
   return true;
-});
+}
 
 // ── SERVER MESSAGE HANDLER ───────────────────────────────────────────────────
 
@@ -729,6 +779,17 @@ function attachVideoOrPoll() {
 }
 
 function handleServerMsg(msg) {
+  try {
+    return handleServerMsgInner(msg);
+  } catch (err) {
+    try {
+      logLine(`[ERR] handleServerMsg threw on type=${msg?.type}: ${err?.message || err}`);
+      console.error('[daddys party] handleServerMsg error:', err, 'msg:', msg);
+    } catch (_) {}
+  }
+}
+
+function handleServerMsgInner(msg) {
   switch (msg.type) {
     case 'created':
       inRoom = true;
@@ -1554,39 +1615,8 @@ function updateCountdownButtonVisibility() {
   btn.style.display = visible ? '' : 'none';
 }
 
-// ── LOG BUFFER ───────────────────────────────────────────────────────────────
-// All system/diagnostic messages go HERE instead of into the chat panel.
-// User can download as a text file via the 📥 button. Cleared on disconnect.
-// Chat messages and gifs ALSO get logged so the file is a full transcript.
-let logBuffer = [];
-function logLine(text) {
-  logBuffer.push({ t: Date.now(), text });
-  // cap at 5000 lines so memory doesn't grow unbounded over a long party
-  if (logBuffer.length > 5000) logBuffer.splice(0, logBuffer.length - 5000);
-}
-
-function downloadLogFile() {
-  if (!logBuffer.length) return;
-  const pad = (n) => String(n).padStart(2, '0');
-  const fmtTime = (ms) => {
-    const d = new Date(ms);
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  };
-  const text = logBuffer.map(e => `[${fmtTime(e.t)}] ${e.text}`).join('\n');
-  const blob = new Blob([text], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  const now = new Date();
-  a.download = `daddys-party-log-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
-}
-
-function clearLogBuffer() { logBuffer = []; }
-
 // ── CHAT/LOG WRITERS ─────────────────────────────────────────────────────────
+// (logBuffer and log helpers are declared at the TOP of the IIFE — see line ~50)
 // appendChat / appendGif: visible in chat panel AND logged
 // appendSys: LOGGED ONLY (not shown in chat — keeps chat minimal)
 // appendCritical: like appendSys but ALSO shown in chat (for warnings user must see)
